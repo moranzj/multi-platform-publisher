@@ -1,0 +1,26 @@
+profile/
+logs/
+__pycache__/
+*.pyc
+gui-state.json
+history.json
+
+# 本地环境 / 构建产物
+.venv/
+venv/
+dist/
+build/
+release/
+*.spec
+*.log
+*.zip
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk

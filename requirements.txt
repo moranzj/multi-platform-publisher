@@ -1,0 +1,6 @@
+# Runtime dependencies
+playwright>=1.40,<2
+
+# Pillow is used for Kuaishou cover brightness selection and cover-change checks.
+# Optional at runtime, but installed by default.
+pillow>=10
