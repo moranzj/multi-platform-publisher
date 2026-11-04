@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from core import __version__
+from core import schedule as sched
 
 ROOT = Path(__file__).resolve().parent
 CLI = ROOT / "cli.py"
@@ -24,9 +25,8 @@ CONFIG = ROOT / "config.json"
 STATE = ROOT / "gui-state.json"
 HISTORY = ROOT / "history.json"
 HISTORY_MAX = 50
-TIME_PRESETS = ["06:00", "07:00", "08:00", "09:00", "10:00", "12:00",
-                "16:00", "17:00", "18:00", "19:00", "20:00", "21:00",
-                "22:00", "23:00"]
+# 每个整点都可选：00:00 ~ 23:00
+TIME_PRESETS = [f"{hour:02d}:00" for hour in range(24)]
 
 
 def child_exe() -> str:
@@ -50,6 +50,16 @@ def load_json(path: Path, default: dict) -> dict:
 def as_text(value, default: str = "") -> str:
     """配置/状态是用户可编辑的，非字符串值不能让 Tk 或 Path 崩掉。"""
     return value if isinstance(value, str) else default
+
+
+def initial_date(saved: str) -> str:
+    """恢复上次的日期；已经过期就退回明天，避免一开就撞上过去时间。"""
+    today = datetime.date.today()
+    try:
+        day = datetime.date.fromisoformat(saved)
+    except (TypeError, ValueError):
+        return (today + datetime.timedelta(days=1)).isoformat()
+    return (day if day >= today else today + datetime.timedelta(days=1)).isoformat()
 
 
 def load_history() -> list[dict]:
@@ -109,9 +119,8 @@ class App:
         self.v_dy = tk.StringVar(
             value=state_text("dy_topics", as_text(defaults.get("douyin_topics"))))
         self.v_desc = tk.StringVar(value=state_text("desc"))
-        # 日期永远默认明天：沿用上次的日期会变成过去时间，平台直接拒收
-        self.v_date = tk.StringVar(
-            value=(datetime.date.today() + datetime.timedelta(days=1)).isoformat())
+        # 记住上次的日期，但过期就退回明天：直接沿用过去的时间平台会拒收
+        self.v_date = tk.StringVar(value=initial_date(state_text("date")))
         when = state_text("when", "schedule")
         self.v_time = tk.StringVar(value=state_text("time") or "06:00")
         self.v_when = tk.StringVar(value=when if when in ("now", "schedule") else "schedule")
@@ -196,13 +205,23 @@ class App:
                                        command=lambda: self._set_day(1))
         self.btn_tomorrow.pack(side="left", padx=(5, 12))
         ttk.Label(when2, text="时间").pack(side="left")
-        self.time_box = ttk.Combobox(when2, textvariable=self.v_time, width=8,
-                                     values=TIME_PRESETS, state="normal")
+        self.time_box = ttk.Combobox(when2, textvariable=self.v_time, width=7,
+                                     values=TIME_PRESETS, state="normal", height=12)
         self.time_box.pack(side="left", padx=4)
-        ttk.Label(when2, text="（下拉选，也可直接改）", foreground="#888").pack(side="left", padx=4)
+        ttk.Label(when2, text="（整点可选，也可手改）", foreground="#888").pack(side="left", padx=4)
         self._when_widgets = [self.date_entry, self.btn_today,
                               self.btn_tomorrow, self.time_box]
         self._sync_when()
+        r += 1
+
+        self.v_when_hint = tk.StringVar(value="")
+        self.lbl_when_hint = ttk.Label(frm, textvariable=self.v_when_hint,
+                                       foreground="#666")
+        self.lbl_when_hint.grid(row=r, column=1, columnspan=2, sticky="w", pady=(0, 4))
+        for var in (self.v_date, self.v_time, self.v_when,
+                    self.c_bili, self.c_ks, self.c_dy):
+            var.trace_add("write", lambda *_: self._update_when_hint())
+        self._update_when_hint()
         r += 1
 
         plat = ttk.LabelFrame(frm, text="发布到", padding=(12, 8))
@@ -274,6 +293,46 @@ class App:
         self.v_date.set(
             (datetime.date.today() + datetime.timedelta(days=offset)).isoformat())
 
+    def _plats(self) -> list[str]:
+        return [key for key, var in (("bili", self.c_bili),
+                                     ("kuaishou", self.c_ks),
+                                     ("douyin", self.c_dy)) if var.get()]
+
+    def _hint_color(self, color: str) -> None:
+        try:
+            self.lbl_when_hint.configure(foreground=color)
+        except Exception:
+            pass
+
+    def _update_when_hint(self) -> None:
+        """把「日期 + 时间」翻译成绝对时间，并提前暴露平台的窗口限制。"""
+        var = getattr(self, "v_when_hint", None)
+        if var is None:
+            return
+        if self.v_when.get() != "schedule":
+            var.set("立即发布：不设定时，页面填好后由你点发布")
+            self._hint_color("#0a7c5a")
+            return
+        try:
+            at = sched.parse(self.v_date.get(), self.v_time.get())
+        except ValueError as exc:
+            var.set(str(exc))
+            self._hint_color("#c0392b")
+            return
+        hours = (at - datetime.datetime.now()).total_seconds() / 3600
+        if hours < 0:
+            var.set(f"→ {at:%Y-%m-%d %H:%M} · 这个时间已经过去了")
+            self._hint_color("#c0392b")
+            return
+        _errors, warnings = sched.check_window(at, self._plats())
+        text = f"→ {at:%Y-%m-%d %H:%M} · 距今 {sched.human_hours(hours)}"
+        if warnings:
+            text += " · " + warnings[0]
+            self._hint_color("#b9770e")
+        else:
+            self._hint_color("#666")
+        var.set(text)
+
     # ------------------------------------------------------------ 动作
     def _browse(self, var: tk.StringVar, kind: str) -> None:
         if kind == "video":
@@ -329,6 +388,7 @@ class App:
                 "ks_topics": self.v_ks.get().strip(),
                 "dy_topics": self.v_dy.get().strip(),
                 "desc": self.v_desc.get().strip(),
+                "date": self.v_date.get().strip(),
                 "time": self.v_time.get().strip(),
                 "when": self.v_when.get(),
             }, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -464,20 +524,27 @@ class App:
         if cover and not Path(cover).is_file():
             messagebox.showwarning("提示", "封面文件不存在，请重新选择")
             return
-        if self.v_when.get() == "schedule":
-            try:
-                datetime.datetime.strptime(
-                    f"{self.v_date.get().strip()} {self.v_time.get().strip()}",
-                    "%Y-%m-%d %H:%M")
-            except ValueError:
-                messagebox.showwarning(
-                    "提示", "日期或时间格式不对。\n日期写 2026-10-22，时间写 06:00")
-                return
-        plats = [k for k, v in (("bili", self.c_bili), ("kuaishou", self.c_ks),
-                                ("douyin", self.c_dy)) if v.get()]
+        plats = self._plats()
         if not plats:
             messagebox.showwarning("提示", "至少勾选一个平台")
             return
+        if self.v_when.get() == "schedule":
+            try:
+                at = sched.parse(self.v_date.get(), self.v_time.get())
+            except ValueError as exc:
+                messagebox.showwarning("提示", str(exc))
+                return
+            # 统一成 2026-11-05 / 06:00，避免把 6、6点 这种写法传给平台
+            self.v_date.set(f"{at:%Y-%m-%d}")
+            self.v_time.set(f"{at:%H:%M}")
+            errors, warnings = sched.check_window(at, plats)
+            if errors:
+                messagebox.showwarning("定时时间不可用", "\n".join(errors))
+                return
+            if warnings and not messagebox.askyesno(
+                    "定时时间可能被拒",
+                    "\n".join(warnings) + "\n\n仍要继续吗？"):
+                return
 
         if self.mode.get() == "auto":
             if not messagebox.askyesno(

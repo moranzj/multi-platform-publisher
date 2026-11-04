@@ -23,6 +23,9 @@ jobs:
       - name: Compile Python files
         run: python -m compileall -q cli.py gui.py core platforms
 
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
       - name: Smoke test imports and version
         run: |
           python cli.py --version

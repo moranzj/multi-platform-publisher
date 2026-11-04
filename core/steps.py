@@ -50,11 +50,14 @@ def shot(page, log: RunLog, tag: str) -> None:
 
 # ---------------------------------------------------------------- 点击
 def click_text(page, text: str, timeout: int = 8000, exact: bool = True,
-               log: RunLog | None = None) -> bool:
+               log: RunLog | None = None, optional: bool = False) -> bool:
     """按可见文本点击。同名元素取最后一个**可见的**（弹窗通常在 DOM 末尾）。
 
     注意：不能直接等最后一个——页面上常有同名但隐藏的副本，
     等它会白白等到超时（快手的「上传封面」就是这样）。
+
+    optional=True 表示这个按钮本来就时有时无（例如「确认发布」弹窗），
+    点不到只记一条普通日志，不报黄。
     """
     try:
         loc = page.get_by_text(text, exact=exact)
@@ -81,7 +84,10 @@ def click_text(page, text: str, timeout: int = 8000, exact: bool = True,
         return True
     except Exception as exc:
         if log:
-            log.warn(f"点不到「{text}」: {type(exc).__name__}")
+            if optional:
+                log.step(f"没有「{text}」弹窗，跳过")
+            else:
+                log.warn(f"点不到「{text}」: {type(exc).__name__}")
         return False
 
 
@@ -259,10 +265,29 @@ def wait_upload(page, log: RunLog, file_mb: float, timeout_min: float = 25) -> N
 
 # ---------------------------------------------------------------- 收尾
 def wait_success(page, patterns: tuple[str, ...], timeout: int = 25_000,
-                 log: RunLog | None = None) -> bool:
-    """提交后确认成功提示。"""
+                 log: RunLog | None = None,
+                 url_hints: tuple[str, ...] = (),
+                 fail_patterns: tuple[str, ...] = ("发布失败", "投稿失败", "提交失败")
+                 ) -> bool:
+    """提交后确认成功。
+
+    两条路都算成功：
+    - 页面跳到「作品管理 / 内容管理」这类地址（提交成功后平台都会跳走）
+    - 页面上出现「发布成功 / 投稿成功」之类的提示
+
+    只认提示会误判：快手/抖音提交成功后直接跳管理页，根本没有成功横幅。
+    """
     deadline = time.time() + timeout / 1000
     while time.time() < deadline:
+        try:
+            url = page.url or ""
+        except Exception:
+            url = ""
+        for hint in url_hints:
+            if hint in url:
+                if log:
+                    log.ok(f"已跳转到管理页（{hint}）")
+                return True
         try:
             txt = page.locator("body").inner_text(timeout=3000)
         except Exception:
@@ -272,7 +297,15 @@ def wait_success(page, patterns: tuple[str, ...], timeout: int = 25_000,
                 if log:
                     log.ok(f"页面确认「{p}」")
                 return True
-        time.sleep(1.5)
+        for p in fail_patterns:
+            if p in txt:
+                if log:
+                    log.err(f"页面提示「{p}」")
+                return False
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        time.sleep(min(1.5, remaining))
     if log:
         log.warn("未见成功提示，请到内容管理页确认")
     return False

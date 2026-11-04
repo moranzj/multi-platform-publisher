@@ -23,6 +23,7 @@ CONFIG_PATH = ROOT / "config.json"
 sys.path.insert(0, str(ROOT))
 
 from core import __version__, steps  # noqa: E402
+from core import schedule as sched  # noqa: E402
 from core.browser import BrowserUnavailable, first_page, open_context  # noqa: E402
 from core.log import RunLog  # noqa: E402
 from platforms.base import Job, Result  # noqa: E402
@@ -302,7 +303,7 @@ def profile_in_use(profile: Path) -> bool:
     return bool(_profile_pids(profile))
 
 
-def preflight(job: Job, log: RunLog) -> bool:
+def preflight(job: Job, log: RunLog, platforms: list[str]) -> bool:
     """开浏览器之前能发现的问题，别让它白跑六分钟。"""
     if not job.title.strip():
         log.err("标题是空的")
@@ -317,16 +318,14 @@ def preflight(job: Job, log: RunLog) -> bool:
             log.err(f"定时格式不对：{job.date} {job.time}（要 YYYY-MM-DD 和 HH:MM）")
             return False
 
-        hours = (at - datetime.datetime.now()).total_seconds() / 3600
-        log.info("发布方式: 定时发布")
-        log.info(f"距今  : {hours:.1f} 小时")
-        if hours < 2:
-            log.warn("定时距现在不足 2 小时，抖音会拒绝（要求 2 小时后、14 天内）")
-        if hours > 14 * 24:
-            log.warn("定时超过 14 天，抖音/快手会拒绝")
-        if hours < 0:
-            log.err("定时时间已经过去了")
+        errors, warnings = sched.check_window(at, platforms)
+        if errors:
+            for msg in errors:
+                log.err(msg)
             return False
+        for msg in warnings:
+            log.warn(msg)
+        log.info(f"窗口  : {sched.describe(platforms)}")
 
     title_len = len(job.title.strip())
     if title_len > 80:
@@ -413,14 +412,22 @@ def cmd_publish(args) -> int:
     if job.immediate:
         log.info("定时  : 立即发布")
     else:
-        log.info(f"定时  : {job.date} {job.time}")
+        try:
+            job.date = sched.normalize_date(job.date)
+            job.time = sched.normalize_time(job.time)
+        except ValueError as exc:
+            log.err(str(exc))
+            log.close()
+            return 2
+        hours = (job.publish_at() - datetime.datetime.now()).total_seconds() / 3600
+        log.info(f"定时  : {job.date} {job.time}（距今 {sched.human_hours(hours)}）")
     log.info(f"平台  : {'、'.join(REGISTRY[k].name for k in platforms)}")
     keep = not args.auto
     mode_text = "保持页面，等你手动发布" if keep else "填完自动提交"
     log.info(f"模式  : {mode_text}")
     if args.headless and keep:
         log.warn("无头模式下看不到页面，保持模式无法手动发布；建议改用 --auto 或去掉 --headless")
-    if not preflight(job, log):
+    if not preflight(job, log, platforms):
         log.close()
         return 2
 
@@ -559,7 +566,8 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--desc", default="",
                      help="文案（默认同标题；B站简介/快手描述/抖音作品描述）")
     pub.add_argument("--date", default="", help="发布日期 YYYY-MM-DD（默认明天）")
-    pub.add_argument("--time", default="06:00", help="发布时间 HH:MM")
+    pub.add_argument("--time", default="06:00",
+                     help="发布时间 HH:MM，可写 6 / 06:00 / 6:30（默认 06:00）")
     pub.add_argument("--now", action="store_true",
                      help="立即发布：不设定时，忽略 --date/--time")
     pub.add_argument("--platforms", default="bili,kuaishou,douyin", help="逗号分隔")

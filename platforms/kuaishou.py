@@ -24,6 +24,8 @@ class Kuaishou(Platform):
     name = "快手"
     url = "https://cp.kuaishou.com/article/publish/video"
     success_patterns = ("发布成功", "作品发布成功", "提交成功")
+    # 提交成功后跳到作品管理；只等横幅会误判成「没提交上」
+    success_urls = ("article/manage",)
 
     def fill(self, page, job: Job, log: RunLog) -> Result | None:
         log.stage("快手 开始")
@@ -61,7 +63,9 @@ class Kuaishou(Platform):
         steps.shot(page, log, "kuaishou-04-cover")
 
         # 4) 定时
-        self._schedule(page, job, log)
+        if not self._schedule(page, job, log):
+            steps.shot(page, log, "kuaishou-05-scheduled")
+            return Result(self.name, False, "定时没设上（已停下，避免误发立即发布）")
         steps.shot(page, log, "kuaishou-05-scheduled")
         log.ok("快手 填写完成，等待提交")
         return None
@@ -72,9 +76,10 @@ class Kuaishou(Platform):
         if not steps.click_text(page, "发布", timeout=10_000, log=log):
             return Result(self.name, False, "点不到发布按钮")
         steps.pause(2, 3)
-        steps.click_text(page, "确认发布", timeout=3000, log=log)
+        steps.click_text(page, "确认发布", timeout=3000, log=log, optional=True)
 
-        ok = steps.wait_success(page, self.success_patterns, log=log)
+        ok = steps.wait_success(page, self.success_patterns, log=log,
+                                url_hints=self.success_urls)
         steps.shot(page, log, "kuaishou-05-result")
         return Result(self.name, True, "已提交" if ok else "已提交（未见成功提示，请核对）")
 
@@ -487,10 +492,10 @@ class Kuaishou(Platform):
         log.step(f"推荐封面按亮度选第 {best + 1} 张（{best_lum:.0f}/255）")
         return best
 
-    def _schedule(self, page, job: Job, log: RunLog) -> None:
+    def _schedule(self, page, job: Job, log: RunLog) -> bool:
         if job.immediate:
             self._set_immediate(page, log)
-            return
+            return True
         log.step(f"设定时发布 {job.date} {job.time}")
         try:
             page.mouse.wheel(0, 2500)
@@ -510,7 +515,7 @@ class Kuaishou(Platform):
                 log.step("已选「定时发布」")
             else:
                 log.warn("找不到定时发布单选")
-                return
+                return False
             page.wait_for_timeout(2000)
 
             # 打开日期时间面板
@@ -525,12 +530,18 @@ class Kuaishou(Platform):
             )
             if not opened:
                 log.warn("找不到日期时间输入框")
-                return
+                return False
             page.wait_for_timeout(1200)
 
             day = str(int(job.date.split("-")[2]))
             if not self._pick_day(page, day):
-                log.warn(f"日历里找不到 {day} 号")
+                log.warn(f"日历里找不到 {day} 号，尝试翻到下月")
+                try:
+                    page.locator(".ant-picker-header-next-btn").first.click(timeout=3000)
+                    page.wait_for_timeout(800)
+                except Exception:
+                    pass
+                self._pick_day(page, day)
             page.wait_for_timeout(900)
 
             # 选完日期面板会刷新，重新点开
@@ -551,9 +562,31 @@ class Kuaishou(Platform):
 
             steps.click_sel(page, "li.ant-picker-ok button", log=log, what="确定")
             page.wait_for_timeout(800)
-            log.ok("定时已设置")
+
+            shown = self._read_schedule(page)
+            want = f"{job.date} {job.time}"
+            shown_norm = shown.replace("/", "-").replace("T", " ")
+            if shown and not shown_norm.startswith(want):
+                log.warn(f"定时框显示「{shown}」，目标「{want}」，没设上")
+                return False
+            log.ok(f"定时已设置（{shown or want}）")
+            return True
         except Exception as exc:
             log.warn(f"定时设置失败: {type(exc).__name__}")
+            return False
+
+    @staticmethod
+    def _read_schedule(page) -> str:
+        try:
+            return (page.evaluate(
+                """() => {
+                    const i = [...document.querySelectorAll('input')]
+                        .find(e => e.placeholder && e.placeholder.includes('选择日期时间'));
+                    return i ? i.value : '';
+                }"""
+            ) or "").strip()
+        except Exception:
+            return ""
 
     @staticmethod
     def _set_immediate(page, log: RunLog) -> None:

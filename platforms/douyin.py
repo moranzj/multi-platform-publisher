@@ -29,6 +29,8 @@ class Douyin(Platform):
     name = "抖音"
     url = "https://creator.douyin.com/creator-micro/content/post/video"
     success_patterns = ("发布成功", "作品发布成功", "提交成功")
+    # 提交成功后跳到内容管理；只等横幅会误判成「没提交上」
+    success_urls = ("content/manage",)
 
     def fill(self, page, job: Job, log: RunLog) -> Result | None:
         log.stage("抖音 开始")
@@ -64,7 +66,9 @@ class Douyin(Platform):
         steps.shot(page, log, "douyin-04-cover")
 
         # 5) 定时
-        self._schedule(page, job, log)
+        if not self._schedule(page, job, log):
+            steps.shot(page, log, "douyin-05-scheduled")
+            return Result(self.name, False, "定时没设上（已停下，避免误发立即发布）")
         steps.shot(page, log, "douyin-05-scheduled")
         log.ok("抖音 填写完成，等待提交")
         return None
@@ -75,9 +79,10 @@ class Douyin(Platform):
         if not self._click_publish(page, log):
             return Result(self.name, False, "点不到发布按钮")
         steps.pause(2, 3)
-        steps.click_text(page, "确认发布", timeout=3000, log=log)
+        steps.click_text(page, "确认发布", timeout=3000, log=log, optional=True)
 
-        ok = steps.wait_success(page, self.success_patterns, log=log)
+        ok = steps.wait_success(page, self.success_patterns, log=log,
+                                url_hints=self.success_urls)
         steps.shot(page, log, "douyin-05-result")
         return Result(self.name, True, "已提交" if ok else "已提交（未见成功提示，请核对）")
 
@@ -368,10 +373,10 @@ class Douyin(Platform):
         except Exception:
             return False
 
-    def _schedule(self, page, job: Job, log: RunLog) -> None:
+    def _schedule(self, page, job: Job, log: RunLog) -> bool:
         if job.immediate:
             self._set_immediate(page, log)
-            return
+            return True
         log.step(f"设定时发布 {job.date} {job.time}")
         try:
             steps.dismiss_overlays(page, log, hints=("上传新封面", "封面制作"))
@@ -391,7 +396,7 @@ class Douyin(Platform):
                 log.step("已选「定时发布」")
             else:
                 log.warn("找不到定时发布选项")
-                return
+                return False
             page.wait_for_timeout(2000)
 
             # 面板有时要等两三秒才挂出来；等不到就再点一次（可能刚才点空了）
@@ -431,7 +436,7 @@ class Douyin(Platform):
 
             if inp is None:
                 log.warn("日期时间输入框没找到，定时没设上，请在网页上手动确认")
-                return
+                return False
 
             # 抖音用的是 Semi Design 日期选择器，`input.value = ...` 只改显示值，
             # 表单状态根本没变（发出去还是「立即发布」）。必须用真实键盘输入 + 回车，
@@ -477,12 +482,14 @@ class Douyin(Platform):
                 cur = ""
             if filled and cur == target:
                 log.ok(f"定时已设置（{target}）")
-            else:
-                log.warn(
-                    f"定时没写进去，当前显示「{cur or '（读不到）'}」，"
-                    "请在网页上手动确认")
+                return True
+            log.warn(
+                f"定时没写进去，当前显示「{cur or '（读不到）'}」，"
+                "请在网页上手动确认")
+            return False
         except Exception as exc:
             log.warn(f"定时设置失败: {type(exc).__name__}")
+            return False
 
     @staticmethod
     def _set_immediate(page, log: RunLog) -> None:

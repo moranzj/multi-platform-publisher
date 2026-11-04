@@ -5,6 +5,9 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
+from core import schedule as sched
 from core import steps
 from core.log import RunLog
 from .base import Job, Platform, Result
@@ -15,6 +18,9 @@ class Bilibili(Platform):
     name = "B站"
     url = "https://member.bilibili.com/platform/upload/video/frame"
     success_patterns = ("投稿成功", "发布成功", "稿件投递成功")
+    # 提交成功后 B站会跳到稿件管理；只等横幅会误判成「没提交上」
+    success_urls = ("upload-manager", "content/manage")
+    fail_patterns = ("投稿失败", "提交失败", "定时发布时间不可用")
 
     # ---- 选择器常量（改版时集中改这里）----
     SEL_TITLE = "input[placeholder='请输入稿件标题']"
@@ -68,23 +74,75 @@ class Bilibili(Platform):
         steps.shot(page, log, "bili-04-cover")
 
         # 4) 定时发布
-        self._schedule(page, job, log)
+        if not self._schedule(page, job, log):
+            steps.shot(page, log, "bili-05-scheduled")
+            return Result(self.name, False, "定时没设上（已停下，避免误发立即发布）")
         steps.shot(page, log, "bili-05-scheduled")
         log.ok("B站 填写完成，等待提交")
         return None
 
     def submit(self, page, job: Job, log: RunLog) -> Result:
         log.stage("B站 提交")
-        log.step("点击「立即投稿」")
-        if not steps.click_sel(page, self.SEL_SUBMIT, log=log, what="立即投稿"):
-            return Result(self.name, False, "点不到投稿按钮")
-        steps.pause(2, 3)
-        steps.click_text(page, "确认投稿", timeout=4000, log=log)
-        steps.click_text(page, "确定", timeout=3000, log=log)
+        original = job
+        for attempt in range(1, 4):
+            if not steps.click_sel(page, self.SEL_SUBMIT, log=log, what="立即投稿"):
+                return Result(self.name, False, "点不到投稿按钮")
+            steps.pause(2, 3)
+            steps.click_text(page, "确认投稿", timeout=4000, log=log, optional=True)
+            steps.pause(1.5, 2.5)
 
-        ok = steps.wait_success(page, self.success_patterns, log=log)
-        steps.shot(page, log, "bili-05-result")
-        return Result(self.name, True, "已提交" if ok else "已提交（未见成功提示，请核对）")
+            reason = self._schedule_rejected(page)
+            if not reason:
+                steps.click_text(page, "确定", timeout=2500, log=log, optional=True)
+                ok = steps.wait_success(
+                    page, self.success_patterns, log=log,
+                    url_hints=self.success_urls,
+                    fail_patterns=self.fail_patterns)
+                steps.shot(page, log, "bili-05-result")
+                return Result(self.name, True,
+                              "已提交" if ok else "已提交（未见成功提示，请核对）")
+
+            log.warn(f"B站拒绝定时时间：{reason}")
+            if attempt >= 3:
+                break
+            self._close_dialog(page, log)
+            # 第一次往后挪 2 小时，第二次挪到第二天同一时间：
+            # 既覆盖「离现在太近」，也覆盖「当天不让约」两种情况
+            later = sched.bump(original.publish_at(), 2 if attempt == 1 else 24)
+            job = replace(original, date=f"{later:%Y-%m-%d}", time=f"{later:%H:%M}")
+            log.step(f"改用 {job.date} {job.time} 重新设定时（第 {attempt + 1} 次）")
+            if not self._schedule(page, job, log):
+                log.warn("重新设置定时失败，停止重试")
+                break
+            steps.pause(1.0, 1.5)
+
+        steps.shot(page, log, "bili-05-rejected")
+        return Result(self.name, False,
+                      f"定时时间被 B站拒绝（原定 {original.date} {original.time}，"
+                      "已试 +2h / +24h），请换个时间或改用立即发布")
+
+    @staticmethod
+    def _schedule_rejected(page) -> str:
+        """提交后 B站会用弹窗拦下不可用的定时时间（只认可见的，避免旧 DOM 误报）。"""
+        for phrase in ("定时发布时间不可用", "定时时间不可用",
+                       "发布时间不可用", "定时发布时间不合法"):
+            try:
+                loc = page.get_by_text(phrase, exact=False)
+                if any(loc.nth(i).is_visible() for i in range(min(loc.count(), 5))):
+                    return phrase
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def _close_dialog(page, log: RunLog) -> None:
+        """Esc 关掉报错弹窗；之后重新设时间比找「确定」更稳。"""
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        steps.pause(0.8, 1.2)
+        steps.dismiss_overlays(page, log)
 
     # ------------------------------------------------------------------
     def _fill_tags(self, page, tags: str, log: RunLog) -> None:
@@ -401,23 +459,30 @@ class Bilibili(Platform):
             return steps.set_files_by_kind(page, "image", cover, log)
         return False
 
-    def _schedule(self, page, job: Job, log: RunLog) -> None:
+    def _schedule(self, page, job: Job, log: RunLog) -> bool:
         if job.immediate:
             self._set_immediate(page, log)
-            return
+            return True
         log.step(f"设定时发布 {job.date} {job.time}")
         try:
             steps.dismiss_overlays(page, log)
             page.mouse.wheel(0, 2500)
             page.wait_for_timeout(1500)
 
-            if not steps.click_sel(page, self.SEL_SCHEDULE_SWITCH, log=log, what="定时发布开关"):
-                log.warn("找不到定时开关")
-                return
-            page.wait_for_timeout(3000)
-            if not page.locator(self.SEL_DATE_INPUT).count():
-                steps.click_sel(page, self.SEL_SCHEDULE_SWITCH, log=log, what="定时开关(重试)")
+            # 重试时开关可能已经开着，再点一下会把它关掉
+            if not self._date_visible(page):
+                if not steps.click_sel(page, self.SEL_SCHEDULE_SWITCH,
+                                       log=log, what="定时发布开关"):
+                    log.warn("找不到定时开关")
+                    return False
                 page.wait_for_timeout(3000)
+            if not self._date_visible(page):
+                steps.click_sel(page, self.SEL_SCHEDULE_SWITCH,
+                                log=log, what="定时开关(重试)")
+                page.wait_for_timeout(3000)
+            if not self._date_visible(page):
+                log.warn("定时面板没打开")
+                return False
 
             # 日期
             steps.click_sel(page, self.SEL_DATE_INPUT, log=log, what="日期框")
@@ -438,9 +503,37 @@ class Bilibili(Platform):
             page.wait_for_timeout(600)
             self._pick_time(page, f"{int(mm):02d}", 1, log)
             page.wait_for_timeout(800)
-            log.ok("定时已设置")
+
+            # 面板显示值必须和表单目标一致：显示对了，提交时才不会被拦
+            shown_date = self._read_text(page, self.SEL_DATE_INPUT)
+            shown_time = self._read_text(page, self.SEL_TIME_INPUT)
+            want_time = f"{int(hh):02d}:{int(mm):02d}"
+            if shown_date and shown_date != job.date:
+                log.warn(f"日期框显示「{shown_date}」，目标「{job.date}」，没设上")
+                return False
+            if shown_time and shown_time != want_time:
+                log.warn(f"时间框显示「{shown_time}」，目标「{want_time}」，没设上")
+                return False
+            log.ok(f"定时已设置（{shown_date or job.date} {shown_time or want_time}）")
+            return True
         except Exception as exc:
             log.warn(f"定时设置失败: {type(exc).__name__}")
+            return False
+
+    @staticmethod
+    def _read_text(page, selector: str) -> str:
+        try:
+            return (page.locator(selector).first.inner_text(timeout=2000) or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _date_visible(page) -> bool:
+        loc = page.locator(Bilibili.SEL_DATE_INPUT)
+        try:
+            return any(loc.nth(i).is_visible() for i in range(min(loc.count(), 3)))
+        except Exception:
+            return False
 
     @staticmethod
     def _set_immediate(page, log: RunLog) -> None:
@@ -448,14 +541,7 @@ class Bilibili(Platform):
         log.step("切换为「立即发布」")
 
         def schedule_on() -> bool:
-            loc = page.locator(Bilibili.SEL_DATE_INPUT)
-            try:
-                for i in range(min(loc.count(), 3)):
-                    if loc.nth(i).is_visible():
-                        return True
-            except Exception:
-                pass
-            return False
+            return Bilibili._date_visible(page)
 
         try:
             page.mouse.wheel(0, 2500)
