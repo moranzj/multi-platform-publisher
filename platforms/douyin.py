@@ -51,13 +51,14 @@ class Douyin(Platform):
         steps.shot(page, log, "douyin-02-uploaded")
 
         # 2) 标题
-        if not self._fill_first(page, TITLE_SELECTORS, job.title, log, "标题"):
+        if not self._fill_first(page, TITLE_SELECTORS, job.title_for("douyin"), log, "标题"):
             return Result(self.name, False, "标题填不进去")
         steps.pause(0.5, 1.0)
 
         # 3) 话题（必须走真实键盘输入，否则不会生成话题胶囊）
         #    文案和标题不同时，也写进作品描述，别让用户填的文案白填
-        if job.douyin_topics or (job.desc and job.desc != job.title):
+        dy_desc = job.desc_for("douyin")
+        if job.douyin_topics or (dy_desc and dy_desc != job.title_for("douyin")):
             self._fill_topics(page, job, log)
         steps.shot(page, log, "douyin-03-text")
 
@@ -101,7 +102,9 @@ class Douyin(Platform):
 
     def _fill_topics(self, page, job: Job, log: RunLog) -> None:
         tags = steps.normalize_topics(job.douyin_topics)
-        desc = job.desc if job.desc and job.desc != job.title else ""
+        dy_title = job.title_for("douyin")
+        dy_desc = job.desc_for("douyin")
+        desc = dy_desc if dy_desc and dy_desc != dy_title else ""
         if not tags and not desc:
             return
         target = None

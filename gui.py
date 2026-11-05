@@ -16,8 +16,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from core import __version__
+from core import __version__, content
 from core import schedule as sched
+from platforms.base import Job
 
 ROOT = Path(__file__).resolve().parent
 CLI = ROOT / "cli.py"
@@ -27,6 +28,9 @@ HISTORY = ROOT / "history.json"
 HISTORY_MAX = 50
 # 每个整点都可选：00:00 ~ 23:00
 TIME_PRESETS = [f"{hour:02d}:00" for hour in range(24)]
+# 选视频后自动找同名封面：视频.jpg / 视频-封面.jpg / 视频_cover.jpg …
+COVER_SUFFIXES = ("", "-封面", "_封面", "-cover", "_cover", "封面")
+COVER_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
 
 def child_exe() -> str:
@@ -119,6 +123,16 @@ class App:
         self.v_dy = tk.StringVar(
             value=state_text("dy_topics", as_text(defaults.get("douyin_topics"))))
         self.v_desc = tk.StringVar(value=state_text("desc"))
+        # 分平台文案覆盖；留空回退到上面的通用标题/文案
+        self.v_bili_title = tk.StringVar(value=state_text("bili_title"))
+        self.v_bili_desc = tk.StringVar(value=state_text("bili_desc"))
+        self.v_ks_title = tk.StringVar(value=state_text("ks_title"))
+        self.v_ks_desc = tk.StringVar(value=state_text("ks_desc"))
+        self.v_dy_title = tk.StringVar(value=state_text("dy_title"))
+        self.v_dy_desc = tk.StringVar(value=state_text("dy_desc"))
+        # 记住哪些标题/封面是自动填的，换视频时可以安全替换，不覆盖手填内容
+        self._auto_title = ""
+        self._auto_cover = ""
         # 记住上次的日期，但过期就退回明天：直接沿用过去的时间平台会拒收
         self.v_date = tk.StringVar(value=initial_date(state_text("date")))
         when = state_text("when", "schedule")
@@ -145,7 +159,10 @@ class App:
 
         def row(r: int, label: str, var: tk.StringVar, hint: str = "", browse: str = "") -> int:
             ttk.Label(frm, text=label).grid(row=r, column=0, sticky="e", pady=3, padx=(0, 8))
-            ttk.Entry(frm, textvariable=var).grid(row=r, column=1, sticky="ew", pady=3)
+            entry = ttk.Entry(frm, textvariable=var)
+            entry.grid(row=r, column=1, sticky="ew", pady=3)
+            if label == "视频文件":
+                self.video_entry = entry
             if browse:
                 ttk.Button(frm, text="浏览…", width=7,
                            command=lambda: self._browse(var, browse)
@@ -176,6 +193,10 @@ class App:
         r += 1
 
         r = row(r, "视频文件", self.v_video, browse="video")
+        self.video_entry.bind(
+            "<FocusOut>", lambda _e: self._autofill_from_video(self.v_video.get().strip()))
+        self.video_entry.bind(
+            "<Return>", lambda _e: self._autofill_from_video(self.v_video.get().strip()))
         r = row(r, "封面图片", self.v_cover, "留空则用平台推荐封面", browse="image")
         r = row(r, "标题", self.v_title)
         r = row(r, "B站标签", self.v_bili_tags, "逗号分隔，如 三国杀,桌游棋牌")
@@ -183,6 +204,22 @@ class App:
         r = row(r, "快手话题", self.v_ks, "空格分隔，#可以不写，会自动补：如 三国杀 三国杀锦囊妙会")
         r = row(r, "抖音话题", self.v_dy, "空格分隔，#可以不写，会自动补：如 三国杀 随时随地杀一下")
         r = row(r, "文案", self.v_desc, "留空则用标题（B站简介 / 快手描述 / 抖音作品描述）")
+
+        copy_tools = ttk.Frame(frm)
+        copy_tools.grid(row=r, column=1, columnspan=2, sticky="w", pady=(0, 2))
+        ttk.Button(copy_tools, text="分平台文案…", width=12,
+                   command=self.edit_copy).pack(side="left")
+        ttk.Button(copy_tools, text="预览 / 检查…", width=12,
+                   command=self.preview).pack(side="left", padx=8)
+        self.v_copy_hint = tk.StringVar(value="")
+        ttk.Label(copy_tools, textvariable=self.v_copy_hint,
+                  foreground="#888").pack(side="left", padx=4)
+        for var in (self.v_bili_title, self.v_bili_desc,
+                    self.v_ks_title, self.v_ks_desc,
+                    self.v_dy_title, self.v_dy_desc):
+            var.trace_add("write", lambda *_: self._update_copy_hint())
+        self._update_copy_hint()
+        r += 1
 
         ttk.Label(frm, text="发布方式").grid(row=r, column=0, sticky="e", pady=3, padx=(0, 8))
         when = ttk.Frame(frm)
@@ -270,6 +307,10 @@ class App:
         sb.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=sb.set)
 
+        # 上次记住的视频还在、但标题是空的：直接用文件名补上
+        if self.v_video.get().strip() and not self.v_title.get().strip():
+            self._autofill_from_video(self.v_video.get().strip())
+
     def _center(self) -> None:
         self.root.update_idletasks()
         w, h = self.root.winfo_width(), self.root.winfo_height()
@@ -343,6 +384,240 @@ class App:
         path = filedialog.askopenfilename(filetypes=types)
         if path:
             var.set(path)
+            if kind == "video":
+                self._autofill_from_video(path)
+            else:
+                self._auto_cover = ""
+
+    @staticmethod
+    def _find_cover(video: Path) -> Path | None:
+        """在视频同目录找同名封面，支持 -封面 / _封面 / -cover / _cover。"""
+        try:
+            files = {p.name.lower(): p for p in video.parent.iterdir() if p.is_file()}
+        except OSError:
+            return None
+        for suffix in COVER_SUFFIXES:
+            for ext in COVER_EXTS:
+                found = files.get((video.stem + suffix + ext).lower())
+                if found:
+                    return found
+        return None
+
+    def _autofill_from_video(self, path: str) -> None:
+        """选视频后用文件名补标题，并找同名封面。
+
+        只替换「空值」或「上次自动填的内容」，用户手改过的标题/封面不动。
+        """
+        if not path:
+            return
+        video = Path(path)
+        if not video.is_file():
+            return
+
+        current_title = self.v_title.get().strip()
+        if not current_title or current_title == self._auto_title:
+            self.v_title.set(video.stem)
+            self._auto_title = video.stem
+
+        found = self._find_cover(video)
+        current_cover = self.v_cover.get().strip()
+        if found and (not current_cover or current_cover == self._auto_cover):
+            self.v_cover.set(str(found))
+            self._auto_cover = str(found)
+        elif not found and current_cover == self._auto_cover:
+            # 换了视频、新视频没有同名封面：清掉上一轮自动填的封面
+            self.v_cover.set("")
+            self._auto_cover = ""
+
+    def _job(self) -> Job:
+        return Job(
+            video=self.v_video.get().strip(),
+            title=self.v_title.get().strip(),
+            cover=self.v_cover.get().strip(),
+            desc=self.v_desc.get().strip(),
+            bili_tags=self.v_bili_tags.get().strip(),
+            bili_topic=self.v_bili_topic.get().strip(),
+            kuaishou_topics=self.v_ks.get().strip(),
+            douyin_topics=self.v_dy.get().strip(),
+            bili_title=self.v_bili_title.get().strip(),
+            bili_desc=self.v_bili_desc.get().strip(),
+            ks_title=self.v_ks_title.get().strip(),
+            ks_desc=self.v_ks_desc.get().strip(),
+            dy_title=self.v_dy_title.get().strip(),
+            dy_desc=self.v_dy_desc.get().strip(),
+        )
+
+    def _update_copy_hint(self) -> None:
+        var = getattr(self, "v_copy_hint", None)
+        if var is None:
+            return
+        names = []
+        if self.v_bili_title.get().strip() or self.v_bili_desc.get().strip():
+            names.append("B站")
+        if self.v_ks_title.get().strip() or self.v_ks_desc.get().strip():
+            names.append("快手")
+        if self.v_dy_title.get().strip() or self.v_dy_desc.get().strip():
+            names.append("抖音")
+        var.set("已单独设置：" + "、".join(names) if names
+                else "未单独设置，使用通用标题 / 文案")
+
+    def _center_window(self, win: tk.Toplevel) -> None:
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_width()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - win.winfo_height()) // 2
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def edit_copy(self) -> None:
+        """分平台标题/文案编辑框。留空就用主界面的通用标题/文案。"""
+        win = tk.Toplevel(self.root)
+        win.title("分平台文案")
+        win.transient(self.root)
+        win.geometry("820x560")
+        win.minsize(680, 460)
+
+        frm = ttk.Frame(win, padding=14)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=2)
+        frm.columnconfigure(2, weight=3)
+        for i in (1, 2, 3):
+            frm.rowconfigure(i, weight=1)
+
+        ttk.Label(frm, text="平台").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(frm, text="单独标题").grid(row=0, column=1, sticky="w", padx=(0, 8))
+        ttk.Label(frm, text="单独简介 / 文案").grid(row=0, column=2, sticky="w")
+
+        specs = (
+            ("B站", "bili", "简介"),
+            ("快手", "ks", "文案"),
+            ("抖音", "dy", "文案"),
+        )
+        widgets: dict[str, tuple[ttk.Entry, tk.Text]] = {}
+        for i, (name, short, desc_label) in enumerate(specs, start=1):
+            ttk.Label(frm, text=name,
+                      font=("Microsoft YaHei UI", 10, "bold")
+                      ).grid(row=i, column=0, sticky="nw", padx=(0, 8), pady=(8, 0))
+            title_w = ttk.Entry(frm)
+            title_w.grid(row=i, column=1, sticky="new", padx=(0, 8), pady=(8, 0))
+            title_w.insert(0, getattr(self, f"v_{short}_title").get())
+            desc_w = tk.Text(frm, height=5, wrap="word", undo=True,
+                             font=("Microsoft YaHei UI", 10), padx=6, pady=4)
+            desc_w.grid(row=i, column=2, sticky="nsew", pady=(8, 0))
+            desc_w.insert("1.0", getattr(self, f"v_{short}_desc").get())
+            widgets[short] = (title_w, desc_w)
+
+        ttk.Label(frm, text="留空则使用主界面的通用标题 / 文案；这里只影响对应平台。",
+                  foreground="#888").grid(row=4, column=0, columnspan=3,
+                                          sticky="w", pady=(10, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+
+        def save() -> None:
+            for short, (title_w, desc_w) in widgets.items():
+                getattr(self, f"v_{short}_title").set(title_w.get().strip())
+                getattr(self, f"v_{short}_desc").set(
+                    desc_w.get("1.0", "end-1c").strip())
+            win.destroy()
+
+        def clear_all() -> None:
+            if not messagebox.askyesno(
+                    "清空", "清空三个平台的单独标题和文案？", parent=win):
+                return
+            for title_w, desc_w in widgets.values():
+                title_w.delete(0, "end")
+                desc_w.delete("1.0", "end")
+
+        ttk.Button(btns, text="保存", command=save).pack(side="right")
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side="right", padx=8)
+        ttk.Button(btns, text="清空全部", command=clear_all).pack(side="left")
+
+        self._center_window(win)
+        win.grab_set()
+        widgets["bili"][0].focus_set()
+
+    def preview(self) -> None:
+        """只读预览：每个平台最终会填什么 + 发布前检查结果。"""
+        video = self.v_video.get().strip()
+        if not video or not Path(video).is_file():
+            messagebox.showwarning("提示", "请选择存在的视频文件")
+            return
+        if not self.v_title.get().strip():
+            messagebox.showwarning("提示", "请填写标题")
+            return
+        plats = self._plats()
+        if not plats:
+            messagebox.showwarning("提示", "至少勾选一个平台")
+            return
+
+        job = self._job()
+        errors, warnings = content.check(job, plats)
+        when_text = "立即发布（不设定时）"
+        if self.v_when.get() == "schedule":
+            try:
+                at = sched.parse(self.v_date.get(), self.v_time.get())
+            except ValueError as exc:
+                errors.append(str(exc))
+            else:
+                when_text = f"定时发布：{at:%Y-%m-%d %H:%M}"
+                sched_errors, sched_warnings = sched.check_window(at, plats)
+                errors += sched_errors
+                warnings += sched_warnings
+
+        win = tk.Toplevel(self.root)
+        win.title("发布前预览 / 检查")
+        win.transient(self.root)
+        win.geometry("860x640")
+        win.minsize(680, 460)
+
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.rowconfigure(0, weight=1)
+        frm.columnconfigure(0, weight=1)
+
+        txt = tk.Text(frm, wrap="word", font=("Microsoft YaHei UI", 10),
+                      padx=10, pady=8, bg="#fcfcfc")
+        txt.grid(row=0, column=0, sticky="nsew")
+        sb = ttk.Scrollbar(frm, command=txt.yview)
+        sb.grid(row=0, column=1, sticky="ns")
+        txt.configure(yscrollcommand=sb.set)
+        txt.tag_configure("head", foreground="#0a5c8a",
+                          font=("Microsoft YaHei UI", 10, "bold"))
+        txt.tag_configure("warn", foreground="#b9770e")
+        txt.tag_configure("err", foreground="#c0392b")
+        txt.tag_configure("ok", foreground="#0a7c5a")
+
+        txt.insert("end", when_text + "\n\n", "head")
+        text = "\n\n".join(content.preview_text(key, job) for key in plats)
+        for line in text.splitlines(keepends=True):
+            txt.insert("end", line, "head" if line.startswith("【") else "")
+
+        if errors or warnings:
+            txt.insert("end", "\n\n" + "—" * 26 + "\n", "head")
+            if errors:
+                txt.insert("end", "必须处理：\n", "err")
+                for msg in errors:
+                    txt.insert("end", f"· {msg}\n", "err")
+            if warnings:
+                txt.insert("end", "提醒（可以继续，但建议看一眼）：\n", "warn")
+                for msg in warnings:
+                    txt.insert("end", f"· {msg}\n", "warn")
+        else:
+            txt.insert("end", "\n\n检查通过：没有发现明显问题。\n", "ok")
+        txt.configure(state="disabled")
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
+        def copy_all() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(txt.get("1.0", "end-1c"))
+            self.v_status.set("预览已复制")
+
+        ttk.Button(btns, text="复制全部", command=copy_all).pack(side="left")
+        ttk.Button(btns, text="关闭", command=win.destroy).pack(side="right")
+
+        self._center_window(win)
+        win.grab_set()
 
     def clear_log(self) -> None:
         self.log.delete("1.0", "end")
@@ -388,6 +663,12 @@ class App:
                 "ks_topics": self.v_ks.get().strip(),
                 "dy_topics": self.v_dy.get().strip(),
                 "desc": self.v_desc.get().strip(),
+                "bili_title": self.v_bili_title.get().strip(),
+                "bili_desc": self.v_bili_desc.get().strip(),
+                "ks_title": self.v_ks_title.get().strip(),
+                "ks_desc": self.v_ks_desc.get().strip(),
+                "dy_title": self.v_dy_title.get().strip(),
+                "dy_desc": self.v_dy_desc.get().strip(),
                 "date": self.v_date.get().strip(),
                 "time": self.v_time.get().strip(),
                 "when": self.v_when.get(),
@@ -409,6 +690,12 @@ class App:
             "bili_topic": self.v_bili_topic.get().strip(),
             "ks_topics": self.v_ks.get().strip(),
             "dy_topics": self.v_dy.get().strip(),
+            "bili_title": self.v_bili_title.get().strip(),
+            "bili_desc": self.v_bili_desc.get().strip(),
+            "ks_title": self.v_ks_title.get().strip(),
+            "ks_desc": self.v_ks_desc.get().strip(),
+            "dy_title": self.v_dy_title.get().strip(),
+            "dy_desc": self.v_dy_desc.get().strip(),
             "time": self.v_time.get().strip(),
             "when": self.v_when.get(),
         }
@@ -417,15 +704,26 @@ class App:
     def _hist_key(entry: dict) -> tuple:
         return (entry.get("title", ""), entry.get("desc", ""),
                 entry.get("bili_tags", ""), entry.get("bili_topic", ""),
-                entry.get("ks_topics", ""), entry.get("dy_topics", ""))
+                entry.get("ks_topics", ""), entry.get("dy_topics", ""),
+                entry.get("bili_title", ""), entry.get("bili_desc", ""),
+                entry.get("ks_title", ""), entry.get("ks_desc", ""),
+                entry.get("dy_title", ""), entry.get("dy_desc", ""))
 
     def _fill_from(self, entry: dict) -> None:
+        self._auto_title = ""
+        self._auto_cover = ""
         self.v_title.set(as_text(entry.get("title")))
         self.v_desc.set(as_text(entry.get("desc")))
         self.v_bili_tags.set(as_text(entry.get("bili_tags")))
         self.v_bili_topic.set(as_text(entry.get("bili_topic")))
         self.v_ks.set(as_text(entry.get("ks_topics")))
         self.v_dy.set(as_text(entry.get("dy_topics")))
+        self.v_bili_title.set(as_text(entry.get("bili_title")))
+        self.v_bili_desc.set(as_text(entry.get("bili_desc")))
+        self.v_ks_title.set(as_text(entry.get("ks_title")))
+        self.v_ks_desc.set(as_text(entry.get("ks_desc")))
+        self.v_dy_title.set(as_text(entry.get("dy_title")))
+        self.v_dy_desc.set(as_text(entry.get("dy_desc")))
         time_value = as_text(entry.get("time"))
         if time_value:
             self.v_time.set(time_value)
@@ -500,6 +798,12 @@ class App:
             ("--bili-topic", self.v_bili_topic.get().strip()),
             ("--ks-topics", self.v_ks.get().strip()),
             ("--dy-topics", self.v_dy.get().strip()),
+            ("--bili-title", self.v_bili_title.get().strip()),
+            ("--bili-desc", self.v_bili_desc.get().strip()),
+            ("--ks-title", self.v_ks_title.get().strip()),
+            ("--ks-desc", self.v_ks_desc.get().strip()),
+            ("--dy-title", self.v_dy_title.get().strip()),
+            ("--dy-desc", self.v_dy_desc.get().strip()),
         ]:
             if value:
                 cmd += [flag, value]
@@ -528,6 +832,10 @@ class App:
         if not plats:
             messagebox.showwarning("提示", "至少勾选一个平台")
             return
+
+        # 内容检查和定时窗口检查合并成一次提示，别让用户连点好几个弹窗
+        job = self._job()
+        errors, warnings = content.check(job, plats)
         if self.v_when.get() == "schedule":
             try:
                 at = sched.parse(self.v_date.get(), self.v_time.get())
@@ -537,14 +845,16 @@ class App:
             # 统一成 2026-11-05 / 06:00，避免把 6、6点 这种写法传给平台
             self.v_date.set(f"{at:%Y-%m-%d}")
             self.v_time.set(f"{at:%H:%M}")
-            errors, warnings = sched.check_window(at, plats)
-            if errors:
-                messagebox.showwarning("定时时间不可用", "\n".join(errors))
-                return
-            if warnings and not messagebox.askyesno(
-                    "定时时间可能被拒",
-                    "\n".join(warnings) + "\n\n仍要继续吗？"):
-                return
+            sched_errors, sched_warnings = sched.check_window(at, plats)
+            errors += sched_errors
+            warnings += sched_warnings
+        if errors:
+            messagebox.showwarning("发布前检查", "\n".join(errors))
+            return
+        if warnings and not messagebox.askyesno(
+                "发布前提醒",
+                "\n".join(warnings) + "\n\n仍要继续吗？"):
+            return
 
         if self.mode.get() == "auto":
             if not messagebox.askyesno(

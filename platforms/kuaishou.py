@@ -46,12 +46,14 @@ class Kuaishou(Platform):
         steps.shot(page, log, "kuaishou-02-uploaded")
 
         # 2) 作品描述 = 标题 + 话题 + 文案（快手只有一个大输入框）
-        desc_parts = [job.title]
+        ks_title = job.title_for("kuaishou")
+        ks_desc = job.desc_for("kuaishou")
+        desc_parts = [ks_title]
         ks_tags = steps.normalize_topics(job.kuaishou_topics)
         if ks_tags:
             desc_parts.append(" ".join(ks_tags))
-        if job.desc and job.desc != job.title:
-            desc_parts.append(job.desc)
+        if ks_desc and ks_desc != ks_title:
+            desc_parts.append(ks_desc)
         desc = " ".join(p.strip() for p in desc_parts if p.strip())
 
         if not self._fill_desc(page, desc, log):

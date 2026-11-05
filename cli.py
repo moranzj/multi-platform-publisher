@@ -22,7 +22,7 @@ CONFIG_PATH = ROOT / "config.json"
 
 sys.path.insert(0, str(ROOT))
 
-from core import __version__, steps  # noqa: E402
+from core import __version__, content, steps  # noqa: E402
 from core import schedule as sched  # noqa: E402
 from core.browser import BrowserUnavailable, first_page, open_context  # noqa: E402
 from core.log import RunLog  # noqa: E402
@@ -309,6 +309,15 @@ def preflight(job: Job, log: RunLog, platforms: list[str]) -> bool:
         log.err("标题是空的")
         return False
 
+    # 分平台标题/文案、标签数量、封面比例、视频格式都在这里统一检查
+    errors, warnings = content.check(job, platforms)
+    for msg in errors:
+        log.err(msg)
+    for msg in warnings:
+        log.warn(msg)
+    if errors:
+        return False
+
     if job.immediate:
         log.info("发布方式: 立即发布（不设定时）")
     else:
@@ -318,40 +327,14 @@ def preflight(job: Job, log: RunLog, platforms: list[str]) -> bool:
             log.err(f"定时格式不对：{job.date} {job.time}（要 YYYY-MM-DD 和 HH:MM）")
             return False
 
-        errors, warnings = sched.check_window(at, platforms)
-        if errors:
-            for msg in errors:
+        sched_errors, sched_warnings = sched.check_window(at, platforms)
+        if sched_errors:
+            for msg in sched_errors:
                 log.err(msg)
             return False
-        for msg in warnings:
+        for msg in sched_warnings:
             log.warn(msg)
         log.info(f"窗口  : {sched.describe(platforms)}")
-
-    title_len = len(job.title.strip())
-    if title_len > 80:
-        log.warn(f"标题 {title_len} 字，B站上限 80 字，可能被截断")
-    if title_len > 30:
-        log.warn(f"标题 {title_len} 字，抖音标题上限约 30 字，可能被截断")
-
-    if job.bili_tags:
-        tags = [t.strip() for t in job.bili_tags.replace("，", ",").split(",") if t.strip()]
-        if len(tags) > 10:
-            log.warn(f"B站标签 {len(tags)} 个，上限 10 个，超出部分可能被丢弃")
-        long_tags = [t for t in tags if len(t) > 20]
-        if long_tags:
-            log.warn("B站标签超过 20 字：" + "、".join(long_tags[:3]))
-
-    video = Path(job.video)
-    ext = video.suffix.lower()
-    if ext not in steps.VIDEO_EXTS:
-        log.warn(f"视频格式 {ext or '(无扩展名)'}，平台可能不支持")
-    try:
-        size_mb = video.stat().st_size / 1024 / 1024
-    except OSError:
-        log.err(f"读不到视频文件：{job.video}")
-        return False
-    if size_mb > 4096:
-        log.warn(f"视频 {size_mb:.0f}MB，超过 4GB 平台可能拒收")
 
     if job.cover:
         cover = Path(job.cover)
@@ -399,10 +382,27 @@ def cmd_publish(args) -> int:
         bili_topic=args.bili_topic.strip() or cfg_default(cfg, "bili_topic"),
         kuaishou_topics=args.ks_topics.strip() or cfg_default(cfg, "kuaishou_topics"),
         douyin_topics=args.dy_topics.strip() or cfg_default(cfg, "douyin_topics"),
+        bili_title=args.bili_title.strip(),
+        bili_desc=args.bili_desc.strip(),
+        ks_title=args.ks_title.strip(),
+        ks_desc=args.ks_desc.strip(),
+        dy_title=args.dy_title.strip(),
+        dy_desc=args.dy_desc.strip(),
         date=(args.date or "").strip(),
         time=(args.time or "06:00").strip() or "06:00",
         immediate=bool(getattr(args, "now", False)),
     )
+
+    if getattr(args, "preview", False):
+        errors, warnings = content.check(job, platforms)
+        for key in platforms:
+            say(content.preview_text(key, job))
+            say("")
+        for msg in warnings:
+            say(f"[!!] {msg}")
+        for msg in errors:
+            say(f"[XX] {msg}")
+        return 0 if not errors else 2
 
     log = RunLog(ROOT, "publish")
     log.stage("发布任务")
@@ -564,7 +564,15 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--title", required=True, help="标题")
     pub.add_argument("--cover", default="", help="封面图片路径（不填则用平台推荐封面）")
     pub.add_argument("--desc", default="",
-                     help="文案（默认同标题；B站简介/快手描述/抖音作品描述）")
+                     help="通用文案（默认同标题；B站简介/快手描述/抖音作品描述）")
+    pub.add_argument("--bili-title", default="", help="B站单独标题（留空用 --title）")
+    pub.add_argument("--bili-desc", default="", help="B站单独简介（留空用 --desc）")
+    pub.add_argument("--ks-title", default="", help="快手单独标题（留空用 --title）")
+    pub.add_argument("--ks-desc", default="", help="快手单独文案（留空用 --desc）")
+    pub.add_argument("--dy-title", default="", help="抖音单独标题（留空用 --title）")
+    pub.add_argument("--dy-desc", default="", help="抖音单独文案（留空用 --desc）")
+    pub.add_argument("--preview", action="store_true",
+                     help="只打印各平台最终文案和检查结果，不打开浏览器")
     pub.add_argument("--date", default="", help="发布日期 YYYY-MM-DD（默认明天）")
     pub.add_argument("--time", default="06:00",
                      help="发布时间 HH:MM，可写 6 / 06:00 / 6:30（默认 06:00）")

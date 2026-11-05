@@ -52,7 +52,7 @@ class Bilibili(Platform):
         steps.shot(page, log, "bili-02-uploaded")
 
         # 2) 标题 / 标签 / 简介
-        if not steps.fill_input(page, self.SEL_TITLE, job.title, log=log):
+        if not steps.fill_input(page, self.SEL_TITLE, job.title_for("bili"), log=log):
             return Result(self.name, False, "标题填不进去")
         steps.pause(0.5, 1.0)
 
@@ -62,8 +62,9 @@ class Bilibili(Platform):
         if job.bili_topic:
             self._add_topic(page, job.bili_topic, log)
 
-        if job.desc:
-            steps.fill_editable(page, self.SEL_DESC, job.desc, log=log)
+        bili_desc = job.desc_for("bili")
+        if bili_desc:
+            steps.fill_editable(page, self.SEL_DESC, bili_desc, log=log)
         steps.shot(page, log, "bili-03-text")
 
         # 3) 封面（没指定就用「系统推荐封面」第一张）
