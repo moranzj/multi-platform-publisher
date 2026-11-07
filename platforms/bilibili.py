@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import replace
 
 from core import schedule as sched
@@ -71,7 +72,7 @@ class Bilibili(Platform):
         if job.cover:
             self._cover(page, job.cover, log)
         else:
-            self._pick_recommend(page, log)
+            self._pick_recommend(page, job.video, log)
         steps.shot(page, log, "bili-04-cover")
 
         # 4) 定时发布
@@ -285,30 +286,341 @@ class Bilibili(Platform):
             except Exception:
                 pass
 
-    @staticmethod
-    def _pick_recommend(page, log: RunLog) -> bool:
-        """用「系统推荐封面」里的第一张。
+    def _pick_recommend(self, page, video: str, log: RunLog) -> bool:
+        """没有指定封面时，尽量让 B站 自动选中一张。
 
-        B站 封面区下面有一排「以下为系统推荐封面」缩略图，
-        点第一张就是 B站 自己推荐的那张（不是视频首帧）。
+        旧版投稿页上传后会默认选中第一张「系统推荐封面」；新版页面
+        只显示「添加封面」，需要在「封面制作」弹窗里用视频帧生成封面。
+        先走旧版，再走新版，最后回读封面区确认真的选中了。
         """
+        # 1) B站 已经自动选好了（旧版常见）
+        for _ in range(3):
+            if self._cover_selected(page):
+                log.ok("B站 已自动选中推荐封面")
+                return True
+            page.wait_for_timeout(800)
+
+        # 2) 旧版推荐列表：点第一张可见的推荐图
         try:
             cards = page.locator("div.img-item-box.img-item-cover")
-            if cards.count() == 0:
-                # 新版页面默认就选中第一张，不需要再点
-                if steps.visible(page, "系统默认选中第一张为封面", exact=False):
-                    log.ok("B站 已默认选中第一张推荐封面")
+            visible = [i for i in range(min(cards.count(), 12))
+                       if cards.nth(i).is_visible()]
+            if visible:
+                card = cards.nth(visible[0])
+                card.scroll_into_view_if_needed(timeout=3000)
+                card.click(timeout=5000)
+                page.wait_for_timeout(1500)
+                if self._cover_selected(page):
+                    log.ok("已用 B站 系统推荐封面")
                     return True
-                log.warn("没找到 B站 系统推荐封面，保留默认")
+                log.warn("点了 B站 推荐封面，但封面区没有变化")
+        except Exception as exc:
+            log.warn(f"选 B站 推荐封面失败: {type(exc).__name__}")
+
+        # 3) 新版空封面 / 其他未选中状态：打开「封面制作」，用视频帧当封面
+        try:
+            if not self._open_cover_editor(page, log):
+                log.warn("找不到 B站 封面入口，保留默认")
                 return False
-            cards.first.scroll_into_view_if_needed(timeout=3000)
-            cards.first.click(timeout=5000)
-            page.wait_for_timeout(1500)
-            log.ok("已用 B站 系统推荐封面")
+            if not self._wait_cover_editor(page):
+                log.warn("B站 封面弹窗没打开，保留默认")
+                return False
+
+            frame = self._video_frame(page, video, log)
+            if not frame:
+                log.warn("没能从视频里取到封面帧，保留默认")
+                self._close_cover_editor(page, log)
+                return False
+
+            if not self._set_cover_frame(page, frame, log):
+                log.warn("视频帧没能塞进 B站 封面弹窗")
+                self._close_cover_editor(page, log)
+                return False
+
+            if not self._finish_cover_editor(page, log):
+                log.warn("B站 封面弹窗没关掉，保留默认")
+                return False
+
+            for _ in range(5):
+                if self._cover_selected(page):
+                    log.ok("B站 没有系统推荐封面，已用视频画面")
+                    return True
+                page.wait_for_timeout(1000)
+            log.warn("B站 封面弹窗完成了，但封面区仍显示未设置")
+            return False
+        except Exception as exc:
+            log.warn(f"B站 自动封面失败: {type(exc).__name__}")
+            try:
+                self._close_cover_editor(page, log)
+            except Exception:
+                pass
+            return False
+
+    @staticmethod
+    def _cover_empty_visible(page) -> bool:
+        """新版封面区是不是「添加封面」的空状态。"""
+        try:
+            empty = page.locator("div.cover-empty")
+            return any(empty.nth(i).is_visible()
+                       for i in range(min(empty.count(), 4)))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _cover_selected(page) -> bool:
+        """回读封面区：新旧版都确认真的有一张封面。"""
+        try:
+            if Bilibili._cover_empty_visible(page):
+                return False
+            img = page.locator("div.cover-img")
+            for i in range(min(img.count(), 4)):
+                el = img.nth(i)
+                if not el.is_visible():
+                    continue
+                style = (el.get_attribute("style") or "").lower()
+                if "background-image" in style and "url(" in style:
+                    return True
+            selected = page.locator("div.img-item-box.img-item-cover-selected")
+            return any(selected.nth(i).is_visible()
+                       for i in range(min(selected.count(), 4)))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _wait_cover_editor(page, tries: int = 6) -> bool:
+        for _ in range(tries):
+            if Bilibili._cover_editor_open(page):
+                return True
+            page.wait_for_timeout(1000)
+        return False
+
+    @staticmethod
+    def _video_frame(page, video: str, log: RunLog) -> bytes | None:
+        """用浏览器自己解码本地视频，抓一帧当封面（不依赖 ffmpeg）。
+
+        做法：往页面里塞一个隐藏 file input，把本地视频文件放进去，
+        再用 <video> + <canvas> 取帧。这样不用额外装 ffmpeg/opencv，
+        也能处理常见 MP4/MOV。
+        """
+        input_id = "__bili_cover_frame_input"
+        try:
+            page.evaluate(
+                """(id) => {
+                    const old = document.getElementById(id);
+                    if (old) old.remove();
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.id = id;
+                    input.style.display = 'none';
+                    document.body.appendChild(input);
+                }""",
+                input_id,
+            )
+            page.locator(f"#{input_id}").set_input_files(video)
+            result = page.evaluate(
+                r"""async (id) => {
+                    const input = document.getElementById(id);
+                    const file = input && input.files && input.files[0];
+                    if (!file) return {ok: false, why: 'no file'};
+                    const url = URL.createObjectURL(file);
+                    const v = document.createElement('video');
+                    v.muted = true;
+                    v.playsInline = true;
+                    v.preload = 'auto';
+                    v.src = url;
+                    v.style.position = 'fixed';
+                    v.style.left = '-9999px';
+                    document.body.appendChild(v);
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const t = setTimeout(
+                                () => reject(new Error('metadata timeout')), 15000);
+                            v.addEventListener('loadedmetadata', () => {
+                                clearTimeout(t); resolve();
+                            }, {once: true});
+                            v.addEventListener('error', () => {
+                                clearTimeout(t);
+                                reject(new Error('video error ' +
+                                    (v.error && v.error.code)));
+                            }, {once: true});
+                        });
+                        const duration = Number.isFinite(v.duration) && v.duration > 0
+                            ? v.duration : 1;
+                        const times = [0.1, 0.25, 0.5].map(p =>
+                            Math.min(Math.max(duration * p, 0.05),
+                                     Math.max(duration - 0.05, 0.05)));
+                        const pick = document.createElement('canvas');
+                        pick.width = 320;
+                        pick.height = Math.max(1, Math.round(
+                            320 * (v.videoHeight || 9) / (v.videoWidth || 16)));
+                        const pctx = pick.getContext('2d', {willReadFrequently: true});
+                        let best = null;
+                        for (const t of times) {
+                            await new Promise((resolve) => {
+                                const timer = setTimeout(resolve, 5000);
+                                v.addEventListener('seeked', () => {
+                                    clearTimeout(timer); resolve();
+                                }, {once: true});
+                                try { v.currentTime = t; }
+                                catch (e) { clearTimeout(timer); resolve(); }
+                            });
+                            if (!v.videoWidth || !v.videoHeight) continue;
+                            pctx.drawImage(v, 0, 0, pick.width, pick.height);
+                            let data = null;
+                            try {
+                                data = pctx.getImageData(
+                                    0, 0, pick.width, pick.height).data;
+                            } catch (e) { data = null; }
+                            let score = 0;
+                            if (data) {
+                                let sum = 0, sum2 = 0, n = 0;
+                                for (let i = 0; i < data.length; i += 28) {
+                                    const y = data[i] * 0.299 +
+                                              data[i + 1] * 0.587 +
+                                              data[i + 2] * 0.114;
+                                    sum += y; sum2 += y * y; n++;
+                                }
+                                const mean = sum / Math.max(n, 1);
+                                const variance = sum2 / Math.max(n, 1) -
+                                                 mean * mean;
+                                // 亮度 + 对比度，避开纯黑/纯白帧
+                                score = mean + Math.sqrt(Math.max(variance, 0)) * 0.5;
+                            }
+                            if (!best || score > best.score) {
+                                best = {t, score};
+                            }
+                        }
+                        if (!best) return {ok: false, why: 'no frame'};
+                        await new Promise((resolve) => {
+                            const timer = setTimeout(resolve, 5000);
+                            v.addEventListener('seeked', () => {
+                                clearTimeout(timer); resolve();
+                            }, {once: true});
+                            try { v.currentTime = best.t; }
+                            catch (e) { clearTimeout(timer); resolve(); }
+                        });
+                        const c = document.createElement('canvas');
+                        const maxW = 1920;
+                        const scale = Math.min(
+                            1, maxW / (v.videoWidth || maxW));
+                        c.width = Math.max(1, Math.round(
+                            (v.videoWidth || 1280) * scale));
+                        c.height = Math.max(1, Math.round(
+                            (v.videoHeight || 720) * scale));
+                        c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+                        return {
+                            ok: true, w: c.width, h: c.height, t: best.t,
+                            data: c.toDataURL('image/jpeg', 0.92),
+                        };
+                    } catch (e) {
+                        return {ok: false, why: String(e && e.name) + ': ' +
+                                String(e && e.message)};
+                    } finally {
+                        URL.revokeObjectURL(url);
+                        v.remove();
+                    }
+                }""",
+                input_id,
+            )
+            if not result.get("ok"):
+                log.warn(f"视频取帧失败: {result.get('why')}")
+                return None
+            data = result["data"].split(",", 1)[1]
+            frame = base64.b64decode(data)
+            log.step(f"视频取帧 {result['w']}x{result['h']} @ {result['t']:.2f}s")
+            return frame
+        except Exception as exc:
+            log.warn(f"视频取帧失败: {type(exc).__name__}")
+            return None
+        finally:
+            try:
+                page.evaluate(
+                    "(id) => { const el = document.getElementById(id);"
+                    " if (el) el.remove(); }",
+                    input_id,
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    def _set_cover_frame(page, frame: bytes, log: RunLog) -> bool:
+        """把视频帧塞进封面制作弹窗的 4:3 图片输入框。"""
+        try:
+            target = page.locator(
+                "div.cover-editor div.cover-editor-panel-canvas-empty"
+                ".ratio_4_3 input[type=file][accept*='image']")
+            if target.count() == 0:
+                target = page.locator(
+                    "div.cover-editor input[type=file][accept*='image']")
+            if target.count() == 0:
+                target = page.locator("input[type=file][accept*='image']")
+            if target.count() == 0:
+                return False
+            target.first.set_input_files({
+                "name": "bili-cover.jpg",
+                "mimeType": "image/jpeg",
+                "buffer": frame,
+            })
+            log.step("注入视频帧到 B站 封面弹窗")
+            page.wait_for_timeout(3000)
+            # 等 4:3 画布真正出现图片；最多再等 8 秒
+            for _ in range(8):
+                filled = page.locator(
+                    "div.cover-editor div.cover-editor-panel-canvas-image")
+                if any(filled.nth(i).is_visible()
+                       for i in range(min(filled.count(), 3))):
+                    break
+                page.wait_for_timeout(1000)
             return True
         except Exception as exc:
-            log.warn(f"选推荐封面失败: {type(exc).__name__}")
+            log.warn(f"注入封面帧失败: {type(exc).__name__}")
             return False
+
+    @classmethod
+    def _finish_cover_editor(cls, page, log: RunLog) -> bool:
+        """点「完成」/「确认同步」，直到封面弹窗关闭。"""
+        page.wait_for_timeout(2000)
+        for _ in range(5):
+            if not cls._cover_editor_open(page):
+                return True
+            steps.click_modal_done(page, log)
+            page.wait_for_timeout(2500)
+            if steps.visible(page, "确认同步", exact=False):
+                steps.click_text(page, "确认同步", timeout=2500, log=log)
+            page.wait_for_timeout(1500)
+        if cls._cover_editor_open(page):
+            steps.dismiss_overlays(
+                page, log,
+                hints=("封面制作", "上传封面", "设置封面", "确认同步"))
+        return not cls._cover_editor_open(page)
+
+    @staticmethod
+    def _close_cover_editor(page, log: RunLog) -> None:
+        """放弃编辑时关掉封面弹窗，别挡着后面的定时设置。"""
+        try:
+            if not Bilibili._cover_editor_open(page):
+                return
+            close = page.locator("div.cover-editor-head-close")
+            for i in range(min(close.count(), 3)):
+                el = close.nth(i)
+                if el.is_visible():
+                    el.click(timeout=3000)
+                    break
+            page.wait_for_timeout(1000)
+            if not Bilibili._cover_editor_open(page):
+                return
+            for text in ("放弃", "确定", "确认"):
+                if steps.click_text(page, text, timeout=1200, exact=False,
+                                    log=log, optional=True):
+                    page.wait_for_timeout(800)
+                    if not Bilibili._cover_editor_open(page):
+                        return
+            if Bilibili._cover_editor_open(page):
+                steps.dismiss_overlays(
+                    page, log,
+                    hints=("封面制作", "上传封面", "设置封面", "确认同步"))
+        except Exception:
+            pass
 
     @staticmethod
     def _cover_editor_open(page) -> bool:
@@ -431,22 +743,10 @@ class Bilibili(Platform):
                 return
             page.wait_for_timeout(4000)
             # 完成 → 确认同步，可能要点多次；以封面编辑弹窗消失为准
-            for _ in range(4):
-                if not self._cover_editor_open(page):
-                    break
-                steps.click_modal_done(page, log)
-                page.wait_for_timeout(2500)
-                if steps.visible(page, "确认同步", exact=False):
-                    steps.click_text(page, "确认同步", timeout=2500, log=log)
-                page.wait_for_timeout(1500)
-
-            if self._cover_editor_open(page):
-                log.warn("封面弹窗仍未关闭，Esc 兜底")
-                steps.dismiss_overlays(
-                    page, log,
-                    hints=("封面制作", "上传封面", "设置封面", "确认同步"))
-            else:
+            if self._finish_cover_editor(page, log):
                 log.ok("封面已设置")
+            else:
+                log.warn("封面弹窗仍未关闭")
         except Exception as exc:
             log.warn(f"封面流程失败: {type(exc).__name__}")
 
