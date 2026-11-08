@@ -287,63 +287,39 @@ class Bilibili(Platform):
                 pass
 
     def _pick_recommend(self, page, video: str, log: RunLog) -> bool:
-        """没有指定封面时，尽量让 B站 自动选中一张。
+        """没有指定封面时，用视频第一帧当封面。
 
-        旧版投稿页上传后会默认选中第一张「系统推荐封面」；新版页面
-        只显示「添加封面」，需要在「封面制作」弹窗里用视频帧生成封面。
-        先走旧版，再走新版，最后回读封面区确认真的选中了。
+        新旧两套投稿页都走同一条路：从本地视频抓第 0 秒的画面，
+        打开「封面制作」弹窗注入图片，再点「完成」。即使旧版页面
+        已经自动选了推荐封面，也会用第一帧替换掉，保证默认行为一致。
         """
-        # 1) B站 已经自动选好了（旧版常见）
-        for _ in range(3):
-            if self._cover_selected(page):
-                log.ok("B站 已自动选中推荐封面")
-                return True
-            page.wait_for_timeout(800)
+        frame = self._video_frame(page, video, log)
+        if not frame:
+            log.warn("没能从视频里取到第一帧")
+            return self._keep_auto_cover(page, log)
 
-        # 2) 旧版推荐列表：点第一张可见的推荐图
-        try:
-            cards = page.locator("div.img-item-box.img-item-cover")
-            visible = [i for i in range(min(cards.count(), 12))
-                       if cards.nth(i).is_visible()]
-            if visible:
-                card = cards.nth(visible[0])
-                card.scroll_into_view_if_needed(timeout=3000)
-                card.click(timeout=5000)
-                page.wait_for_timeout(1500)
-                if self._cover_selected(page):
-                    log.ok("已用 B站 系统推荐封面")
-                    return True
-                log.warn("点了 B站 推荐封面，但封面区没有变化")
-        except Exception as exc:
-            log.warn(f"选 B站 推荐封面失败: {type(exc).__name__}")
-
-        # 3) 新版空封面 / 其他未选中状态：打开「封面制作」，用视频帧当封面
         try:
             if not self._open_cover_editor(page, log):
                 log.warn("找不到 B站 封面入口，保留默认")
-                return False
+                return self._keep_auto_cover(page, log)
             if not self._wait_cover_editor(page):
                 log.warn("B站 封面弹窗没打开，保留默认")
-                return False
-
-            frame = self._video_frame(page, video, log)
-            if not frame:
-                log.warn("没能从视频里取到封面帧，保留默认")
                 self._close_cover_editor(page, log)
-                return False
+                return self._keep_auto_cover(page, log)
 
             if not self._set_cover_frame(page, frame, log):
-                log.warn("视频帧没能塞进 B站 封面弹窗")
+                log.warn("视频首帧没能塞进 B站 封面弹窗")
                 self._close_cover_editor(page, log)
-                return False
+                return self._keep_auto_cover(page, log)
 
             if not self._finish_cover_editor(page, log):
                 log.warn("B站 封面弹窗没关掉，保留默认")
-                return False
+                self._close_cover_editor(page, log)
+                return self._keep_auto_cover(page, log)
 
             for _ in range(5):
                 if self._cover_selected(page):
-                    log.ok("B站 没有系统推荐封面，已用视频画面")
+                    log.ok("B站 已用视频第一帧作为封面")
                     return True
                 page.wait_for_timeout(1000)
             log.warn("B站 封面弹窗完成了，但封面区仍显示未设置")
@@ -354,7 +330,16 @@ class Bilibili(Platform):
                 self._close_cover_editor(page, log)
             except Exception:
                 pass
-            return False
+            return self._keep_auto_cover(page, log)
+
+    @staticmethod
+    def _keep_auto_cover(page, log: RunLog) -> bool:
+        """首帧设置失败时，如果 B站 自己选了封面就保留。"""
+        if Bilibili._cover_selected(page):
+            log.ok("保留 B站 自动选中的封面")
+            return True
+        log.warn("B站 封面仍未设置，保留默认")
+        return False
 
     @staticmethod
     def _cover_empty_visible(page) -> bool:
@@ -396,11 +381,11 @@ class Bilibili(Platform):
 
     @staticmethod
     def _video_frame(page, video: str, log: RunLog) -> bytes | None:
-        """用浏览器自己解码本地视频，抓一帧当封面（不依赖 ffmpeg）。
+        """用浏览器自己解码本地视频，抓第一帧当封面（不依赖 ffmpeg）。
 
         做法：往页面里塞一个隐藏 file input，把本地视频文件放进去，
-        再用 <video> + <canvas> 取帧。这样不用额外装 ffmpeg/opencv，
-        也能处理常见 MP4/MOV。
+        再用 <video> + <canvas> 取第 0 秒的画面。这样不用额外装
+        ffmpeg/opencv，也能处理常见 MP4/MOV。
         """
         input_id = "__bili_cover_frame_input"
         try:
@@ -444,72 +429,40 @@ class Bilibili(Platform):
                                     (v.error && v.error.code)));
                             }, {once: true});
                         });
-                        const duration = Number.isFinite(v.duration) && v.duration > 0
-                            ? v.duration : 1;
-                        const times = [0.1, 0.25, 0.5].map(p =>
-                            Math.min(Math.max(duration * p, 0.05),
-                                     Math.max(duration - 0.05, 0.05)));
-                        const pick = document.createElement('canvas');
-                        pick.width = 320;
-                        pick.height = Math.max(1, Math.round(
-                            320 * (v.videoHeight || 9) / (v.videoWidth || 16)));
-                        const pctx = pick.getContext('2d', {willReadFrequently: true});
-                        let best = null;
-                        for (const t of times) {
+                        // 等第一帧真正解码出来，再画到 canvas
+                        if (v.readyState < 2) {
+                            await new Promise((resolve) => {
+                                const timer = setTimeout(resolve, 8000);
+                                v.addEventListener('loadeddata', () => {
+                                    clearTimeout(timer); resolve();
+                                }, {once: true});
+                                v.addEventListener('canplay', () => {
+                                    clearTimeout(timer); resolve();
+                                }, {once: true});
+                            });
+                        }
+                        // 确保停在 0 秒；已经是 0 就不重复 seek
+                        if (Math.abs(v.currentTime) > 0.001) {
                             await new Promise((resolve) => {
                                 const timer = setTimeout(resolve, 5000);
                                 v.addEventListener('seeked', () => {
                                     clearTimeout(timer); resolve();
                                 }, {once: true});
-                                try { v.currentTime = t; }
+                                try { v.currentTime = 0; }
                                 catch (e) { clearTimeout(timer); resolve(); }
                             });
-                            if (!v.videoWidth || !v.videoHeight) continue;
-                            pctx.drawImage(v, 0, 0, pick.width, pick.height);
-                            let data = null;
-                            try {
-                                data = pctx.getImageData(
-                                    0, 0, pick.width, pick.height).data;
-                            } catch (e) { data = null; }
-                            let score = 0;
-                            if (data) {
-                                let sum = 0, sum2 = 0, n = 0;
-                                for (let i = 0; i < data.length; i += 28) {
-                                    const y = data[i] * 0.299 +
-                                              data[i + 1] * 0.587 +
-                                              data[i + 2] * 0.114;
-                                    sum += y; sum2 += y * y; n++;
-                                }
-                                const mean = sum / Math.max(n, 1);
-                                const variance = sum2 / Math.max(n, 1) -
-                                                 mean * mean;
-                                // 亮度 + 对比度，避开纯黑/纯白帧
-                                score = mean + Math.sqrt(Math.max(variance, 0)) * 0.5;
-                            }
-                            if (!best || score > best.score) {
-                                best = {t, score};
-                            }
                         }
-                        if (!best) return {ok: false, why: 'no frame'};
-                        await new Promise((resolve) => {
-                            const timer = setTimeout(resolve, 5000);
-                            v.addEventListener('seeked', () => {
-                                clearTimeout(timer); resolve();
-                            }, {once: true});
-                            try { v.currentTime = best.t; }
-                            catch (e) { clearTimeout(timer); resolve(); }
-                        });
+                        if (!v.videoWidth || !v.videoHeight) {
+                            return {ok: false, why: 'no video size'};
+                        }
                         const c = document.createElement('canvas');
                         const maxW = 1920;
-                        const scale = Math.min(
-                            1, maxW / (v.videoWidth || maxW));
-                        c.width = Math.max(1, Math.round(
-                            (v.videoWidth || 1280) * scale));
-                        c.height = Math.max(1, Math.round(
-                            (v.videoHeight || 720) * scale));
+                        const scale = Math.min(1, maxW / v.videoWidth);
+                        c.width = Math.max(1, Math.round(v.videoWidth * scale));
+                        c.height = Math.max(1, Math.round(v.videoHeight * scale));
                         c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
                         return {
-                            ok: true, w: c.width, h: c.height, t: best.t,
+                            ok: true, w: c.width, h: c.height, t: v.currentTime,
                             data: c.toDataURL('image/jpeg', 0.92),
                         };
                     } catch (e) {
@@ -527,7 +480,7 @@ class Bilibili(Platform):
                 return None
             data = result["data"].split(",", 1)[1]
             frame = base64.b64decode(data)
-            log.step(f"视频取帧 {result['w']}x{result['h']} @ {result['t']:.2f}s")
+            log.step(f"视频首帧 {result['w']}x{result['h']}")
             return frame
         except Exception as exc:
             log.warn(f"视频取帧失败: {type(exc).__name__}")
