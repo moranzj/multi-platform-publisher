@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import base64
 from dataclasses import replace
 
 from core import schedule as sched
@@ -68,11 +67,11 @@ class Bilibili(Platform):
             steps.fill_editable(page, self.SEL_DESC, bili_desc, log=log)
         steps.shot(page, log, "bili-03-text")
 
-        # 3) 封面（没指定就用「系统推荐封面」第一张）
+        # 3) 封面（没指定就用视频第一帧）
         if job.cover:
             self._cover(page, job.cover, log)
         else:
-            self._pick_recommend(page, job.video, log)
+            self._use_video_cover(page, job.video, log)
         steps.shot(page, log, "bili-04-cover")
 
         # 4) 定时发布
@@ -286,14 +285,14 @@ class Bilibili(Platform):
             except Exception:
                 pass
 
-    def _pick_recommend(self, page, video: str, log: RunLog) -> bool:
+    def _use_video_cover(self, page, video: str, log: RunLog) -> bool:
         """没有指定封面时，用视频第一帧当封面。
 
         新旧两套投稿页都走同一条路：从本地视频抓第 0 秒的画面，
         打开「封面制作」弹窗注入图片，再点「完成」。即使旧版页面
         已经自动选了推荐封面，也会用第一帧替换掉，保证默认行为一致。
         """
-        frame = self._video_frame(page, video, log)
+        frame = steps.video_first_frame(page, video, log)
         if not frame:
             log.warn("没能从视频里取到第一帧")
             return self._keep_auto_cover(page, log)
@@ -378,122 +377,6 @@ class Bilibili(Platform):
                 return True
             page.wait_for_timeout(1000)
         return False
-
-    @staticmethod
-    def _video_frame(page, video: str, log: RunLog) -> bytes | None:
-        """用浏览器自己解码本地视频，抓第一帧当封面（不依赖 ffmpeg）。
-
-        做法：往页面里塞一个隐藏 file input，把本地视频文件放进去，
-        再用 <video> + <canvas> 取第 0 秒的画面。这样不用额外装
-        ffmpeg/opencv，也能处理常见 MP4/MOV。
-        """
-        input_id = "__bili_cover_frame_input"
-        try:
-            page.evaluate(
-                """(id) => {
-                    const old = document.getElementById(id);
-                    if (old) old.remove();
-                    const input = document.createElement('input');
-                    input.type = 'file';
-                    input.id = id;
-                    input.style.display = 'none';
-                    document.body.appendChild(input);
-                }""",
-                input_id,
-            )
-            page.locator(f"#{input_id}").set_input_files(video)
-            result = page.evaluate(
-                r"""async (id) => {
-                    const input = document.getElementById(id);
-                    const file = input && input.files && input.files[0];
-                    if (!file) return {ok: false, why: 'no file'};
-                    const url = URL.createObjectURL(file);
-                    const v = document.createElement('video');
-                    v.muted = true;
-                    v.playsInline = true;
-                    v.preload = 'auto';
-                    v.src = url;
-                    v.style.position = 'fixed';
-                    v.style.left = '-9999px';
-                    document.body.appendChild(v);
-                    try {
-                        await new Promise((resolve, reject) => {
-                            const t = setTimeout(
-                                () => reject(new Error('metadata timeout')), 15000);
-                            v.addEventListener('loadedmetadata', () => {
-                                clearTimeout(t); resolve();
-                            }, {once: true});
-                            v.addEventListener('error', () => {
-                                clearTimeout(t);
-                                reject(new Error('video error ' +
-                                    (v.error && v.error.code)));
-                            }, {once: true});
-                        });
-                        // 等第一帧真正解码出来，再画到 canvas
-                        if (v.readyState < 2) {
-                            await new Promise((resolve) => {
-                                const timer = setTimeout(resolve, 8000);
-                                v.addEventListener('loadeddata', () => {
-                                    clearTimeout(timer); resolve();
-                                }, {once: true});
-                                v.addEventListener('canplay', () => {
-                                    clearTimeout(timer); resolve();
-                                }, {once: true});
-                            });
-                        }
-                        // 确保停在 0 秒；已经是 0 就不重复 seek
-                        if (Math.abs(v.currentTime) > 0.001) {
-                            await new Promise((resolve) => {
-                                const timer = setTimeout(resolve, 5000);
-                                v.addEventListener('seeked', () => {
-                                    clearTimeout(timer); resolve();
-                                }, {once: true});
-                                try { v.currentTime = 0; }
-                                catch (e) { clearTimeout(timer); resolve(); }
-                            });
-                        }
-                        if (!v.videoWidth || !v.videoHeight) {
-                            return {ok: false, why: 'no video size'};
-                        }
-                        const c = document.createElement('canvas');
-                        const maxW = 1920;
-                        const scale = Math.min(1, maxW / v.videoWidth);
-                        c.width = Math.max(1, Math.round(v.videoWidth * scale));
-                        c.height = Math.max(1, Math.round(v.videoHeight * scale));
-                        c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-                        return {
-                            ok: true, w: c.width, h: c.height, t: v.currentTime,
-                            data: c.toDataURL('image/jpeg', 0.92),
-                        };
-                    } catch (e) {
-                        return {ok: false, why: String(e && e.name) + ': ' +
-                                String(e && e.message)};
-                    } finally {
-                        URL.revokeObjectURL(url);
-                        v.remove();
-                    }
-                }""",
-                input_id,
-            )
-            if not result.get("ok"):
-                log.warn(f"视频取帧失败: {result.get('why')}")
-                return None
-            data = result["data"].split(",", 1)[1]
-            frame = base64.b64decode(data)
-            log.step(f"视频首帧 {result['w']}x{result['h']}")
-            return frame
-        except Exception as exc:
-            log.warn(f"视频取帧失败: {type(exc).__name__}")
-            return None
-        finally:
-            try:
-                page.evaluate(
-                    "(id) => { const el = document.getElementById(id);"
-                    " if (el) el.remove(); }",
-                    input_id,
-                )
-            except Exception:
-                pass
 
     @staticmethod
     def _set_cover_frame(page, frame: bytes, log: RunLog) -> bool:

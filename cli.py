@@ -408,7 +408,7 @@ def cmd_publish(args) -> int:
     log.stage("发布任务")
     log.info(f"视频  : {job.video}  ({steps.size_mb(job.video):.1f}MB)")
     log.info(f"标题  : {job.title}")
-    log.info(f"封面  : {job.cover or '（未指定，用平台推荐封面）'}")
+    log.info(f"封面  : {job.cover or '（未指定，用视频第一帧）'}")
     if job.immediate:
         log.info("定时  : 立即发布")
     else:
@@ -562,7 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     pub = sub.add_parser("publish", help="发布一条视频")
     pub.add_argument("--video", required=True, help="视频文件路径")
     pub.add_argument("--title", required=True, help="标题")
-    pub.add_argument("--cover", default="", help="封面图片路径（不填则用平台推荐封面）")
+    pub.add_argument("--cover", default="", help="封面图片路径（不填则用视频第一帧）")
     pub.add_argument("--desc", default="",
                      help="通用文案（默认同标题；B站简介/快手描述/抖音作品描述）")
     pub.add_argument("--bili-title", default="", help="B站单独标题（留空用 --title）")

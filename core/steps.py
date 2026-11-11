@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import random
 import re
@@ -234,6 +235,122 @@ def set_files_by_kind(page, kind: str, path: str | Path,
             if log:
                 log.warn(f"文件选择器也失败: {type(exc).__name__}")
     return False
+
+
+# ---------------------------------------------------------------- 封面帧
+def video_first_frame(page, video: str | Path, log: RunLog) -> bytes | None:
+    """用浏览器解码本地视频，返回第 0 秒的 JPEG 画面。
+
+    不依赖 ffmpeg/opencv：往页面里塞一个隐藏 file input，把视频文件
+    放进去，再用 <video> + <canvas> 取第一帧。B站/快手/抖音共用。
+    """
+    input_id = "__publisher_first_frame_input"
+    try:
+        page.evaluate(
+            """(id) => {
+                const old = document.getElementById(id);
+                if (old) old.remove();
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.id = id;
+                input.style.display = 'none';
+                document.body.appendChild(input);
+            }""",
+            input_id,
+        )
+        page.locator(f"#{input_id}").set_input_files(str(video))
+        result = page.evaluate(
+            r"""async (id) => {
+                const input = document.getElementById(id);
+                const file = input && input.files && input.files[0];
+                if (!file) return {ok: false, why: 'no file'};
+                const url = URL.createObjectURL(file);
+                const v = document.createElement('video');
+                v.muted = true;
+                v.playsInline = true;
+                v.preload = 'auto';
+                v.src = url;
+                v.style.position = 'fixed';
+                v.style.left = '-9999px';
+                document.body.appendChild(v);
+                try {
+                    await new Promise((resolve, reject) => {
+                        const t = setTimeout(
+                            () => reject(new Error('metadata timeout')), 15000);
+                        v.addEventListener('loadedmetadata', () => {
+                            clearTimeout(t); resolve();
+                        }, {once: true});
+                        v.addEventListener('error', () => {
+                            clearTimeout(t);
+                            reject(new Error('video error ' +
+                                (v.error && v.error.code)));
+                        }, {once: true});
+                    });
+                    // 等第一帧真正解码出来，再画到 canvas
+                    if (v.readyState < 2) {
+                        await new Promise((resolve) => {
+                            const t = setTimeout(resolve, 8000);
+                            v.addEventListener('loadeddata', () => {
+                                clearTimeout(t); resolve();
+                            }, {once: true});
+                            v.addEventListener('canplay', () => {
+                                clearTimeout(t); resolve();
+                            }, {once: true});
+                        });
+                    }
+                    // 确保停在 0 秒；已经是 0 就不重复 seek
+                    if (Math.abs(v.currentTime) > 0.001) {
+                        await new Promise((resolve) => {
+                            const t = setTimeout(resolve, 5000);
+                            v.addEventListener('seeked', () => {
+                                clearTimeout(t); resolve();
+                            }, {once: true});
+                            try { v.currentTime = 0; }
+                            catch (e) { clearTimeout(t); resolve(); }
+                        });
+                    }
+                    if (!v.videoWidth || !v.videoHeight) {
+                        return {ok: false, why: 'no video size'};
+                    }
+                    const c = document.createElement('canvas');
+                    const maxW = 1920;
+                    const scale = Math.min(1, maxW / v.videoWidth);
+                    c.width = Math.max(1, Math.round(v.videoWidth * scale));
+                    c.height = Math.max(1, Math.round(v.videoHeight * scale));
+                    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+                    return {
+                        ok: true, w: c.width, h: c.height,
+                        data: c.toDataURL('image/jpeg', 0.92),
+                    };
+                } catch (e) {
+                    return {ok: false, why: String(e && e.name) + ': ' +
+                            String(e && e.message)};
+                } finally {
+                    URL.revokeObjectURL(url);
+                    v.remove();
+                }
+            }""",
+            input_id,
+        )
+        if not result.get("ok"):
+            log.warn(f"视频取帧失败: {result.get('why')}")
+            return None
+        data = result["data"].split(",", 1)[1]
+        frame = base64.b64decode(data)
+        log.step(f"视频首帧 {result['w']}x{result['h']}")
+        return frame
+    except Exception as exc:
+        log.warn(f"视频取帧失败: {type(exc).__name__}")
+        return None
+    finally:
+        try:
+            page.evaluate(
+                "(id) => { const el = document.getElementById(id);"
+                " if (el) el.remove(); }",
+                input_id,
+            )
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- 等待

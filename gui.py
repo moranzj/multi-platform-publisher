@@ -197,7 +197,7 @@ class App:
             "<FocusOut>", lambda _e: self._autofill_from_video(self.v_video.get().strip()))
         self.video_entry.bind(
             "<Return>", lambda _e: self._autofill_from_video(self.v_video.get().strip()))
-        r = row(r, "封面图片", self.v_cover, "留空则用平台推荐封面", browse="image")
+        r = row(r, "封面图片", self.v_cover, "留空则用视频第一帧", browse="image")
         r = row(r, "标题", self.v_title)
         r = row(r, "B站标签", self.v_bili_tags, "逗号分隔，如 三国杀,桌游棋牌")
         r = row(r, "B站话题", self.v_bili_topic, "参与话题：搜平台现有的话题，逗号/空格分隔")

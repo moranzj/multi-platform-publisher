@@ -62,8 +62,8 @@ class Douyin(Platform):
             self._fill_topics(page, job, log)
         steps.shot(page, log, "douyin-03-text")
 
-        # 4) 封面（没指定就点平台推荐的第一张）
-        self._cover(page, job.cover, log)
+        # 4) 封面（没指定就用视频第一帧）
+        self._cover(page, job.cover, job.video, log)
         steps.shot(page, log, "douyin-04-cover")
 
         # 5) 定时
@@ -187,18 +187,30 @@ class Douyin(Platform):
         except Exception:
             return False
 
-    def _cover(self, page, cover: str, log: RunLog) -> None:
-        """抖音封面：没指定就用「Ai智能推荐封面」第一张，指定了才走上传。
+    def _cover(self, page, cover: str, video: str, log: RunLog) -> None:
+        """抖音封面：没指定就用视频第一帧，指定了就用指定图片。
 
         上传的坑：编辑器默认用视频首帧，直接塞页面顶部的 input 不生效；
         必须点「选择封面」打开面板，再塞 selectArea 里的 semi-upload input。
         """
-        log.step("上传封面" if cover else "未指定封面，用抖音推荐的封面")
-        try:
-            if not cover:
-                self._pick_recommend(page, log)
+        auto = not cover
+        if auto:
+            log.step("未指定封面，用视频第一帧")
+            frame = steps.video_first_frame(page, video, log)
+            if not frame:
+                log.warn("没能从视频里取到第一帧，保留抖音默认封面")
                 return
+            path = log.dir / "douyin-first-frame.jpg"
+            try:
+                path.write_bytes(frame)
+            except Exception as exc:
+                log.warn(f"首帧保存失败: {type(exc).__name__}，保留抖音默认封面")
+                return
+            cover = str(path)
+        else:
+            log.step("上传封面")
 
+        try:
             if not steps.visible(page, "设置横封面", exact=False):
                 self._open_cover_editor(page, log)
                 for _ in range(6):
@@ -235,35 +247,9 @@ class Douyin(Platform):
                 log.warn("封面编辑器未关闭，Esc 兜底")
                 steps.dismiss_overlays(page, log, hints=("设置横封面", "设置竖封面"))
             else:
-                log.ok("封面已设置")
+                log.ok("抖音 已用视频第一帧作为封面" if auto else "封面已设置")
         except Exception as exc:
             log.warn(f"封面流程失败: {type(exc).__name__}")
-
-    @staticmethod
-    def _pick_recommend(page, log: RunLog) -> bool:
-        """「Ai智能推荐封面」点第一张，弹窗里确认应用。"""
-        try:
-            clicked = page.evaluate("""() => {
-                const box = document.querySelector("[class*='recommendContainer']");
-                if (!box) return false;
-                const imgs = [...box.querySelectorAll('img')]
-                    .filter(e => e.offsetParent && e.getBoundingClientRect().width > 40);
-                if (!imgs.length) return false;
-                imgs[0].click();
-                return true;
-            }""")
-            if not clicked:
-                log.warn("找不到抖音的推荐封面，保留视频首帧")
-                return False
-            page.wait_for_timeout(1200)
-            if steps.visible(page, "是否确认应用此封面", exact=False):
-                steps.click_text(page, "确定", timeout=3000, log=log)
-                page.wait_for_timeout(1500)
-            log.ok("已应用抖音推荐封面")
-            return True
-        except Exception as exc:
-            log.warn(f"应用推荐封面失败: {type(exc).__name__}")
-            return False
 
     @staticmethod
     def _open_cover_editor(page, log: RunLog) -> bool:

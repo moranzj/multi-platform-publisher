@@ -60,8 +60,8 @@ class Kuaishou(Platform):
             return Result(self.name, False, "作品描述填不进去")
         steps.shot(page, log, "kuaishou-03-text")
 
-        # 3) 封面（没指定就点平台推荐的第一张）
-        self._cover(page, job.cover, log)
+        # 3) 封面（没指定就用视频第一帧）
+        self._cover(page, job.cover, job.video, log)
         steps.shot(page, log, "kuaishou-04-cover")
 
         # 4) 定时
@@ -104,19 +104,31 @@ class Kuaishou(Platform):
         log.warn("所有描述输入框都失效")
         return False
 
-    def _cover(self, page, cover: str, log: RunLog) -> None:
-        """快手封面：有图就上传，没图就点「智能推荐封面」里的一张。
+    def _cover(self, page, cover: str, video: str, log: RunLog) -> None:
+        """快手封面：有图就上传；没图就用视频第一帧上传。
 
         新版弹窗是「封面截取 / 上传封面」两个 tab：
         切到「上传封面」→ 塞图 → 等预览真的渲染出来 → 点底部「确认」。
-        只有「弹窗关掉 + 主封面缩略图变了」才算成功。
+        首帧自动路径不再比对缩略图：平台默认封面本来就可能就是首帧。
         """
-        log.step("上传封面" if cover else "未指定封面，用快手推荐的封面")
-        try:
-            if not cover:
-                self._pick_recommend(page, log)
+        auto = not cover
+        if auto:
+            log.step("未指定封面，用视频第一帧")
+            frame = steps.video_first_frame(page, video, log)
+            if not frame:
+                log.warn("没能从视频里取到第一帧，保留快手默认封面")
                 return
+            path = log.dir / "kuaishou-first-frame.jpg"
+            try:
+                path.write_bytes(frame)
+            except Exception as exc:
+                log.warn(f"首帧保存失败: {type(exc).__name__}，保留快手默认封面")
+                return
+            cover = str(path)
+        else:
+            log.step("上传封面")
 
+        try:
             self._wait_cover_ready(page, log)
             before = self._cover_shot(page)
             before_src = self._cover_src(page)
@@ -127,6 +139,10 @@ class Kuaishou(Platform):
                         page.wait_for_timeout(1500)
                         continue
                     log.warn("封面没设置成功，请在网页上手动设置")
+                    return
+
+                if auto:
+                    log.ok("快手 已用视频第一帧作为封面")
                     return
 
                 after_src = self._cover_src(page)
@@ -430,69 +446,6 @@ class Kuaishou(Platform):
                     .length"""))
         except Exception:
             return 0
-
-    def _pick_recommend(self, page, log: RunLog) -> bool:
-        """从「智能推荐封面」里挑最亮的一张。
-
-        推荐位是按顺序给的，第一张经常就是视频开头那帧黑的；直接点第一张
-        看起来跟没设置一样，所以按亮度挑一张更像封面的。
-        """
-        try:
-            tiles = page.locator("[class*='_recommend-cover-item']")
-            count = tiles.count()
-            if count == 0:
-                log.warn("找不到快手的推荐封面，保留视频首帧")
-                return False
-            idx = self._brightest_tile(page, log)
-            tiles.nth(idx).scroll_into_view_if_needed(timeout=3000)
-            tiles.nth(idx).click(timeout=5000)
-            page.wait_for_timeout(2500)
-            log.ok(f"已应用快手推荐封面（第 {idx + 1} 张）")
-            return True
-        except Exception as exc:
-            log.warn(f"应用推荐封面失败: {type(exc).__name__}")
-            return False
-
-    @staticmethod
-    def _brightest_tile(page, log: RunLog) -> int:
-        """挑最亮的一张推荐封面。
-
-        推荐图的 CDN 是跨域的，页面里 canvas 读像素会被安全策略拦掉，
-        所以把图下载下来用 Pillow 算平均亮度。算不出来就退化为第 2 张
-        （第 1 张通常就是当前首帧，常常是黑的）。
-        """
-        try:
-            srcs = page.evaluate(
-                """() => [...document.querySelectorAll("[class*='_recommend-cover-item']")]
-                    .map(t => {
-                        const img = t.querySelector('img');
-                        return img ? (img.currentSrc || img.src || '') : '';
-                    })"""
-            )
-        except Exception:
-            return 0
-        fallback = 1 if len(srcs) > 1 else 0
-        try:
-            import io
-
-            from PIL import Image
-        except Exception:
-            return fallback
-
-        best, best_lum = fallback, 0.0
-        for i, src in enumerate(srcs):
-            if not src:
-                continue
-            try:
-                body = page.request.get(src, timeout=8000).body()
-                im = Image.open(io.BytesIO(body)).convert("L").resize((16, 16))
-                lum = sum(im.getdata()) / 256
-            except Exception:
-                continue
-            if lum > best_lum:
-                best, best_lum = i, lum
-        log.step(f"推荐封面按亮度选第 {best + 1} 张（{best_lum:.0f}/255）")
-        return best
 
     def _schedule(self, page, job: Job, log: RunLog) -> bool:
         if job.immediate:
