@@ -26,8 +26,9 @@ CONFIG = ROOT / "config.json"
 STATE = ROOT / "gui-state.json"
 HISTORY = ROOT / "history.json"
 HISTORY_MAX = 50
-# 每个整点都可选：00:00 ~ 23:00
-TIME_PRESETS = [f"{hour:02d}:00" for hour in range(24)]
+# 半点一档：00:00 ~ 23:30；任意分钟可直接手输（如 06:05）
+TIME_PRESETS = [f"{hour:02d}:{minute:02d}" for hour in range(24)
+                for minute in (0, 30)]
 # 选视频后自动找同名封面：视频.jpg / 视频-封面.jpg / 视频_cover.jpg …
 COVER_SUFFIXES = ("", "-封面", "_封面", "-cover", "_cover", "封面")
 COVER_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
@@ -245,16 +246,16 @@ class App:
         self.time_box = ttk.Combobox(when2, textvariable=self.v_time, width=7,
                                      values=TIME_PRESETS, state="normal", height=12)
         self.time_box.pack(side="left", padx=4)
-        self.btn_noon = ttk.Button(when2, text="12点", width=5,
-                                   command=lambda: self._set_time("12:00"))
-        self.btn_noon.pack(side="left", padx=(0, 5))
-        self.btn_evening = ttk.Button(when2, text="晚上6点", width=7,
+        self.btn_morning = ttk.Button(when2, text="06:00", width=6,
+                                      command=lambda: self._set_time("06:00"))
+        self.btn_morning.pack(side="left", padx=(0, 5))
+        self.btn_evening = ttk.Button(when2, text="18:00", width=6,
                                       command=lambda: self._set_time("18:00"))
         self.btn_evening.pack(side="left", padx=(0, 5))
-        ttk.Label(when2, text="（整点可选，也可手改）", foreground="#888").pack(side="left", padx=4)
+        ttk.Label(when2, text="（半小时一档，可手输任意时分）", foreground="#888").pack(side="left", padx=4)
         self._when_widgets = [self.date_entry, self.btn_today,
                               self.btn_tomorrow, self.time_box,
-                              self.btn_noon, self.btn_evening]
+                              self.btn_morning, self.btn_evening]
         self._sync_when()
         r += 1
 
