@@ -245,9 +245,16 @@ class App:
         self.time_box = ttk.Combobox(when2, textvariable=self.v_time, width=7,
                                      values=TIME_PRESETS, state="normal", height=12)
         self.time_box.pack(side="left", padx=4)
+        self.btn_noon = ttk.Button(when2, text="12点", width=5,
+                                   command=lambda: self._set_time("12:00"))
+        self.btn_noon.pack(side="left", padx=(0, 5))
+        self.btn_evening = ttk.Button(when2, text="晚上6点", width=7,
+                                      command=lambda: self._set_time("18:00"))
+        self.btn_evening.pack(side="left", padx=(0, 5))
         ttk.Label(when2, text="（整点可选，也可手改）", foreground="#888").pack(side="left", padx=4)
         self._when_widgets = [self.date_entry, self.btn_today,
-                              self.btn_tomorrow, self.time_box]
+                              self.btn_tomorrow, self.time_box,
+                              self.btn_noon, self.btn_evening]
         self._sync_when()
         r += 1
 
@@ -333,6 +340,10 @@ class App:
     def _set_day(self, offset: int) -> None:
         self.v_date.set(
             (datetime.date.today() + datetime.timedelta(days=offset)).isoformat())
+
+    def _set_time(self, value: str) -> None:
+        """常用时间一键填入（只改时间，不动日期）。"""
+        self.v_time.set(value)
 
     def _plats(self) -> list[str]:
         return [key for key, var in (("bili", self.c_bili),
