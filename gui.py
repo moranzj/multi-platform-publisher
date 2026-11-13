@@ -93,11 +93,11 @@ class App:
         self._closing = False
 
         root.title(f"多平台视频发布器 v{__version__}")
-        # 小屏笔记本（1366x768）放不下 820 高，按屏幕高度自适应
-        screen_h = root.winfo_screenheight()
-        height = min(820, max(640, screen_h - 90))
-        root.geometry(f"860x{height}")
-        root.minsize(760, min(700, height))
+        # 左右分栏布局：右边日志常驻，宽度给足让两边都放得下
+        width = min(1120, max(1000, root.winfo_screenwidth() - 280))
+        height = min(840, max(660, root.winfo_screenheight() - 80))
+        root.geometry(f"{width}x{height}")
+        root.minsize(940, min(620, height))
         try:
             ttk.Style().theme_use("vista")
         except Exception:
@@ -157,42 +157,54 @@ class App:
 
     # ------------------------------------------------------------ 布局
     def _build(self) -> None:
-        frm = ttk.Frame(self.root, padding=14)
-        frm.pack(fill="both", expand=True)
+        # 左右分栏：左边填表，右边「运行日志 + 状态」常驻——
+        # 不管窗口多小，任务进度都不会被挤到看不见。
+        outer = ttk.Frame(self.root, padding=10)
+        outer.pack(fill="both", expand=True)
+        pane = ttk.PanedWindow(outer, orient="horizontal")
+        pane.pack(fill="both", expand=True)
+        self.pane = pane
+
+        frm = ttk.Frame(pane, padding=(0, 0, 10, 0))
         frm.columnconfigure(1, weight=1)
 
-        def row(r: int, label: str, var: tk.StringVar, hint: str = "", browse: str = "") -> int:
-            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="e", pady=3, padx=(0, 8))
+        def row(r: int, label: str, var: tk.StringVar, hint: str = "",
+                browse: str = "") -> int:
+            """一行字段：标签 | 输入框 | 浏览按钮 | 行内小提示（不另占一行）。"""
+            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="e", pady=2, padx=(0, 8))
             entry = ttk.Entry(frm, textvariable=var)
-            entry.grid(row=r, column=1, sticky="ew", pady=3)
-            if label == "视频文件":
-                self.video_entry = entry
+            entry.grid(row=r, column=1,
+                       columnspan=1 if browse else (2 if hint else 3),
+                       sticky="ew", pady=2)
             if browse:
                 ttk.Button(frm, text="浏览…", width=7,
                            command=lambda: self._browse(var, browse)
-                           ).grid(row=r, column=2, padx=(6, 0), pady=3)
+                           ).grid(row=r, column=2, padx=(6, 0), pady=2)
             if hint:
-                ttk.Label(frm, text=hint, foreground="#888").grid(row=r + 1, column=1, sticky="w")
-                return r + 2
+                ttk.Label(frm, text=hint, foreground="#888",
+                          font=("Microsoft YaHei UI", 8)
+                          ).grid(row=r, column=3, sticky="w", padx=(6, 0))
+            if label == "视频文件":
+                self.video_entry = entry
             return r + 1
 
         r = 0
-        ttk.Label(frm, text="默认只填表、不提交；填好后页面保持打开，你自己点发布。也可以在下面切换为自动提交。",
+        ttk.Label(frm, text="默认填好就停、不自动提交；页面保持打开，你在网页上点发布。也可切为自动提交。",
                   foreground="#0a7c5a",
-                  font=("Microsoft YaHei UI", 10, "bold")
-                  ).grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 10))
+                  font=("Microsoft YaHei UI", 9, "bold")
+                  ).grid(row=r, column=0, columnspan=4, sticky="w", pady=(0, 6))
         r += 1
 
         hist = ttk.Frame(frm)
-        hist.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(0, 8))
-        ttk.Label(hist, text="历史记录").pack(side="left")
-        self.hist_box = ttk.Combobox(hist, state="readonly", width=46)
-        self.hist_box.pack(side="left", padx=8)
+        hist.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        ttk.Label(hist, text="历史").pack(side="left")
+        self.hist_box = ttk.Combobox(hist, state="readonly", width=36)
+        self.hist_box.pack(side="left", padx=6)
         self.hist_box.bind("<<ComboboxSelected>>", self._apply_hist)
         ttk.Button(hist, text="存为模板", width=9,
                    command=self._record_hist_now).pack(side="left")
-        ttk.Button(hist, text="删除", width=6,
-                   command=self._del_hist).pack(side="left", padx=6)
+        ttk.Button(hist, text="删除", width=5,
+                   command=self._del_hist).pack(side="left", padx=4)
         self._refresh_hist()
         r += 1
 
@@ -201,18 +213,17 @@ class App:
             "<FocusOut>", lambda _e: self._autofill_from_video(self.v_video.get().strip()))
         self.video_entry.bind(
             "<Return>", lambda _e: self._autofill_from_video(self.v_video.get().strip()))
-        r = row(r, "封面图片", self.v_cover, "留空则用视频第一帧", browse="image")
+        r = row(r, "封面图片", self.v_cover, "留空用视频第一帧", browse="image")
         r = row(r, "标题", self.v_title)
-        r = row(r, "B站标签", self.v_bili_tags, "逗号分隔，如 三国杀,桌游棋牌")
-        r = row(r, "B站话题", self.v_bili_topic, "参与话题：搜平台现有的话题，逗号/空格分隔")
-        r = row(r, "快手话题", self.v_ks, "空格分隔，#可以不写，会自动补：如 三国杀 三国杀锦囊妙会")
-        r = row(r, "抖音话题", self.v_dy, "空格分隔，#可以不写，会自动补：如 三国杀 随时随地杀一下")
-        r = row(r, "抖音游戏", self.v_dy_game,
-                "抖音挂「游戏手柄」并关联这个游戏（如 三国杀）；留空不挂。快手无此入口")
-        r = row(r, "文案", self.v_desc, "留空则用标题（B站简介 / 快手描述 / 抖音作品描述）")
+        r = row(r, "文案", self.v_desc, "留空同标题")
+        r = row(r, "B站标签", self.v_bili_tags, "逗号分隔")
+        r = row(r, "B站话题", self.v_bili_topic, "逗号分隔")
+        r = row(r, "快手话题", self.v_ks, "空格分隔")
+        r = row(r, "抖音话题", self.v_dy, "空格分隔")
+        r = row(r, "抖音游戏", self.v_dy_game, "留空不挂")
 
         copy_tools = ttk.Frame(frm)
-        copy_tools.grid(row=r, column=1, columnspan=2, sticky="w", pady=(0, 2))
+        copy_tools.grid(row=r, column=1, columnspan=3, sticky="w", pady=(2, 0))
         ttk.Button(copy_tools, text="分平台文案…", width=12,
                    command=self.edit_copy).pack(side="left")
         ttk.Button(copy_tools, text="预览 / 检查…", width=12,
@@ -229,7 +240,7 @@ class App:
 
         ttk.Label(frm, text="发布方式").grid(row=r, column=0, sticky="e", pady=3, padx=(0, 8))
         when = ttk.Frame(frm)
-        when.grid(row=r, column=1, columnspan=2, sticky="w", pady=3)
+        when.grid(row=r, column=1, columnspan=3, sticky="w", pady=3)
         ttk.Radiobutton(when, text="立即发布", value="now", variable=self.v_when,
                         command=self._sync_when).pack(side="left")
         ttk.Radiobutton(when, text="定时发布", value="schedule", variable=self.v_when,
@@ -238,26 +249,27 @@ class App:
 
         ttk.Label(frm, text="定时时间").grid(row=r, column=0, sticky="e", pady=3, padx=(0, 8))
         when2 = ttk.Frame(frm)
-        when2.grid(row=r, column=1, columnspan=2, sticky="w", pady=3)
-        self.date_entry = ttk.Entry(when2, textvariable=self.v_date, width=13)
+        when2.grid(row=r, column=1, columnspan=3, sticky="w", pady=3)
+        self.date_entry = ttk.Entry(when2, textvariable=self.v_date, width=12)
         self.date_entry.pack(side="left")
-        self.btn_today = ttk.Button(when2, text="今天", width=5,
+        self.btn_today = ttk.Button(when2, text="今天", width=4,
                                     command=lambda: self._set_day(0))
-        self.btn_today.pack(side="left", padx=(5, 0))
-        self.btn_tomorrow = ttk.Button(when2, text="明天", width=5,
+        self.btn_today.pack(side="left", padx=(4, 0))
+        self.btn_tomorrow = ttk.Button(when2, text="明天", width=4,
                                        command=lambda: self._set_day(1))
-        self.btn_tomorrow.pack(side="left", padx=(5, 12))
+        self.btn_tomorrow.pack(side="left", padx=(4, 8))
         ttk.Label(when2, text="时间").pack(side="left")
         self.time_box = ttk.Combobox(when2, textvariable=self.v_time, width=7,
                                      values=TIME_PRESETS, state="normal", height=12)
         self.time_box.pack(side="left", padx=4)
-        self.btn_morning = ttk.Button(when2, text="06:00", width=6,
+        self.btn_morning = ttk.Button(when2, text="06:00", width=5,
                                       command=lambda: self._set_time("06:00"))
-        self.btn_morning.pack(side="left", padx=(0, 5))
-        self.btn_evening = ttk.Button(when2, text="18:00", width=6,
+        self.btn_morning.pack(side="left")
+        self.btn_evening = ttk.Button(when2, text="18:00", width=5,
                                       command=lambda: self._set_time("18:00"))
-        self.btn_evening.pack(side="left", padx=(0, 5))
-        ttk.Label(when2, text="（半小时一档，可手输任意时分）", foreground="#888").pack(side="left", padx=4)
+        self.btn_evening.pack(side="left", padx=(4, 0))
+        ttk.Label(when2, text="可手输任意时分", foreground="#888",
+                  font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(6, 0))
         self._when_widgets = [self.date_entry, self.btn_today,
                               self.btn_tomorrow, self.time_box,
                               self.btn_morning, self.btn_evening]
@@ -267,45 +279,51 @@ class App:
         self.v_when_hint = tk.StringVar(value="")
         self.lbl_when_hint = ttk.Label(frm, textvariable=self.v_when_hint,
                                        foreground="#666")
-        self.lbl_when_hint.grid(row=r, column=1, columnspan=2, sticky="w", pady=(0, 4))
+        self.lbl_when_hint.grid(row=r, column=1, columnspan=3, sticky="w", pady=(0, 2))
         for var in (self.v_date, self.v_time, self.v_when,
                     self.c_bili, self.c_ks, self.c_dy):
             var.trace_add("write", lambda *_: self._update_when_hint())
         self._update_when_hint()
         r += 1
 
-        plat = ttk.LabelFrame(frm, text="发布到", padding=(12, 8))
-        plat.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(12, 6))
-        ttk.Checkbutton(plat, text="B站", variable=self.c_bili).pack(side="left", padx=(0, 18))
-        ttk.Checkbutton(plat, text="快手", variable=self.c_ks).pack(side="left", padx=(0, 18))
-        ttk.Checkbutton(plat, text="抖音", variable=self.c_dy).pack(side="left")
-        r += 1
-
-        mode = ttk.LabelFrame(frm, text="跑完之后", padding=(12, 8))
-        mode.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(0, 6))
-        ttk.Radiobutton(mode, text="填好就停，页面保持打开，我自己点发布（推荐）",
-                        variable=self.mode, value="hold").pack(anchor="w")
-        ttk.Radiobutton(mode, text="填好并自动提交",
-                        variable=self.mode, value="auto").pack(anchor="w", pady=(4, 0))
+        foot = ttk.Frame(frm)
+        foot.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Label(foot, text="发布到").pack(side="left")
+        ttk.Checkbutton(foot, text="B站", variable=self.c_bili).pack(side="left", padx=(2, 10))
+        ttk.Checkbutton(foot, text="快手", variable=self.c_ks).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(foot, text="抖音", variable=self.c_dy).pack(side="left")
+        ttk.Label(foot, text="跑完").pack(side="left", padx=(16, 0))
+        ttk.Radiobutton(foot, text="填好就停（推荐）", value="hold",
+                        variable=self.mode).pack(side="left")
+        ttk.Radiobutton(foot, text="自动提交", value="auto",
+                        variable=self.mode).pack(side="left", padx=(6, 0))
         r += 1
 
         btns = ttk.Frame(frm)
-        btns.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(2, 8))
+        btns.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         self.btn_run = ttk.Button(btns, text="开始填表", command=self.run)
         self.btn_run.pack(side="left")
         self.btn_stop = ttk.Button(btns, text="停止", width=6, state="disabled",
                                    command=self.stop)
         self.btn_stop.pack(side="left", padx=8)
-        ttk.Button(btns, text="清空日志", command=self.clear_log).pack(side="left")
-        ttk.Button(btns, text="打开日志目录", command=self.open_logs).pack(side="left", padx=8)
-        ttk.Button(btns, text="重新登录", command=self.relogin).pack(side="left")
-        self.v_status = tk.StringVar(value="就绪")
-        ttk.Label(btns, textvariable=self.v_status, foreground="#666").pack(side="right")
-        r += 1
+        ttk.Button(btns, text="打开日志目录", command=self.open_logs).pack(side="left")
+        ttk.Button(btns, text="重新登录", command=self.relogin).pack(side="left", padx=8)
 
-        frm.rowconfigure(r, weight=1)
-        box = ttk.Frame(frm)
-        box.grid(row=r, column=0, columnspan=3, sticky="nsew")
+        # ---- 右栏：运行日志 + 状态，常驻可见 ----
+        logside = ttk.Frame(pane, padding=(10, 0, 0, 0))
+
+        head = ttk.Frame(logside)
+        head.pack(fill="x", pady=(0, 4))
+        ttk.Label(head, text="运行日志",
+                  font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
+        ttk.Button(head, text="清空", width=5, command=self.clear_log).pack(
+            side="right")
+        self.v_status = tk.StringVar(value="就绪")
+        ttk.Label(head, textvariable=self.v_status,
+                  foreground="#0a7c5a").pack(side="right", padx=8)
+
+        box = ttk.Frame(logside)
+        box.pack(fill="both", expand=True)
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
         self.log = tk.Text(box, wrap="word", bg="#1e1e1e", fg="#7CFC00",
@@ -320,9 +338,31 @@ class App:
         sb.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=sb.set)
 
+        # 两栏都填好再挂进 PanedWindow，首次布局才有正确的请求宽度
+        pane.add(frm, weight=3)
+        pane.add(logside, weight=2)
+        try:
+            pane.paneconfigure(logside, minsize=330)
+        except Exception:
+            pass
+        self.root.after_idle(self._place_sash)
+
         # 上次记住的视频还在、但标题是空的：直接用文件名补上
         if self.v_video.get().strip() and not self.v_title.get().strip():
             self._autofill_from_video(self.v_video.get().strip())
+
+    def _place_sash(self, attempt: int = 0) -> None:
+        """窗口映射后把分隔条放到位：左边表单约 600px，其余给日志。
+
+        布局刚映射时分栏宽度可能还没最终确定，到位前小间隔重试几次。
+        """
+        try:
+            self.pane.sashpos(0, 600)
+            settled = self.pane.sashpos(0) == 600
+        except Exception:
+            return
+        if not settled and attempt < 8:
+            self.root.after(120, lambda: self._place_sash(attempt + 1))
 
     def _center(self) -> None:
         self.root.update_idletasks()
