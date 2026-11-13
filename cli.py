@@ -16,7 +16,8 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-ROOT = Path(__file__).resolve().parent
+ROOT = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent)
 PROFILE_DIR = ROOT / "profile"
 CONFIG_PATH = ROOT / "config.json"
 
@@ -131,8 +132,9 @@ def cmd_doctor(_args) -> int:
                 print(f"浏览器      : {channel} {b.version} ✓")
                 b.close()
                 break
-            except Exception:
+            except Exception as exc:
                 print(f"浏览器      : {channel} 不可用")
+                print(f"              原因: {type(exc).__name__}: {exc}")
         else:
             print("[XX] Chrome / Edge 都启动不了")
             ok = False
@@ -600,11 +602,14 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-if __name__ == "__main__":
+def main() -> int:
     args = build_parser().parse_args()
     try:
-        code = args.func(args)
+        return args.func(args)
     except BrokenPipeError:
         # 图形界面关掉后 stdout 管道会断；任务本身已经跑完，按成功退出
-        code = 0
-    raise SystemExit(code)
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

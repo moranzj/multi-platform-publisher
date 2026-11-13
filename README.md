@@ -58,6 +58,31 @@
 
 ---
 
+## exe 免安装版（打开即用）
+
+不想装 Python？直接用打包好的 exe 版：Release 页下载 **`multi-platform-publisher-<版本>-exe.zip`**。
+
+1. 解压到任意**可写**的目录（如 `D:\多平台发布器`），不要放 Program Files。
+2. 双击里面的 **`多平台发布器.exe`** —— 无需安装 Python；浏览器复用系统已装的 Chrome 或 Edge（两个都没有就先装一个 Edge）。
+3. 首次使用点界面里的 **「重新登录」**（会弹出控制台窗口），三个平台各扫码一次；登录态存在同目录 `profile` 里，之后免登录。
+
+命令行也直接用这个 exe：
+
+```powershell
+.\多平台发布器.exe doctor
+.\多平台发布器.exe login
+.\多平台发布器.exe publish --platforms douyin --video D:\视频\xxx.mp4 --title 标题
+```
+
+注意：
+
+- exe 没有数字签名，部分杀毒软件可能误报——PyInstaller 打包的常见现象，加白名单即可。
+- 窗口版 exe 不占用控制台，命令行输出请重定向查看：`.\多平台发布器.exe doctor > out.txt`。
+- 首次启动浏览器前程序会自动探测 TEMP 是否可写；被安全软件限制时自动改用同目录 `tmp\`，无需手动处理。
+- 运行日志在 exe 同目录 `logs\` 下；`profile\` 是登录态，勿分享给他人。
+
+---
+
 ## 一键安装（Windows，推荐）
 
 1. 下载本仓库（GitHub 页面点 **Code → Download ZIP**）并解压，或者 `git clone`。

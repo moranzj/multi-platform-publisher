@@ -20,7 +20,8 @@ from core import __version__, content
 from core import schedule as sched
 from platforms.base import Job
 
-ROOT = Path(__file__).resolve().parent
+ROOT = (Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+        else Path(__file__).resolve().parent)
 CLI = ROOT / "cli.py"
 CONFIG = ROOT / "config.json"
 STATE = ROOT / "gui-state.json"
@@ -35,7 +36,13 @@ COVER_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 
 
 def child_exe() -> str:
-    """pythonw 下 sys.executable 没有控制台，子进程改用 python.exe 才拿得到输出。"""
+    """子进程可执行文件。
+
+    打包成 exe 后就是自己（后面跟上 publish / login 子命令即可）；
+    开发态用 python.exe 而不是 pythonw.exe，子进程才有控制台输出。
+    """
+    if getattr(sys, "frozen", False):
+        return sys.executable
     exe = sys.executable
     if exe.lower().endswith("pythonw.exe"):
         candidate = exe[:-len("pythonw.exe")] + "python.exe"
@@ -690,7 +697,11 @@ class App:
 
     def relogin(self) -> None:
         try:
-            subprocess.Popen([child_exe(), str(CLI), "login"], cwd=str(ROOT),
+            cmd = [child_exe()]
+            if not getattr(sys, "frozen", False):
+                cmd.append(str(CLI))
+            cmd.append("login")
+            subprocess.Popen(cmd, cwd=str(ROOT),
                              creationflags=subprocess.CREATE_NEW_CONSOLE)
         except Exception as exc:
             messagebox.showerror("启动失败", f"无法启动登录窗口：\n{exc}")
@@ -843,9 +854,12 @@ class App:
         self._refresh_hist()
 
     def _cmd(self, video: str, title: str, plats: list[str]) -> list[str]:
-        cmd = [child_exe(), str(CLI), "publish",
-               "--video", video, "--title", title,
-               "--platforms", ",".join(plats)]
+        cmd = [child_exe()]
+        if not getattr(sys, "frozen", False):
+            cmd.append(str(CLI))
+        cmd += ["publish",
+                "--video", video, "--title", title,
+                "--platforms", ",".join(plats)]
         if self.v_when.get() == "now":
             cmd.append("--now")
         else:
@@ -1024,6 +1038,12 @@ class App:
 
 
 def main() -> None:
+    # 打包成 exe 后这里是唯一入口：带子命令（doctor / login / publish）走命令行，
+    # 不带参数才开图形界面。
+    if (getattr(sys, "frozen", False) and sys.argv[1:2]
+            and sys.argv[1] in {"doctor", "login", "publish"}):
+        import cli
+        raise SystemExit(cli.main())
     try:
         root = tk.Tk()
         App(root)
