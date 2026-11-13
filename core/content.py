@@ -74,7 +74,9 @@ def compose(key: str, job: "Job") -> dict[str, str]:
         "name": str(spec["name"]),
         "title": title,
         "body": " ".join(p.strip() for p in parts if p.strip()),
-        "extra": "",
+        # 抖音挂了游戏手柄时把游戏名亮出来，用户好核对
+        "extra": (f"游戏手柄：{(job.dy_game or '').strip()}（快手网页端无此入口，不挂）"
+                  if key == "douyin" and (job.dy_game or "").strip() else ""),
     }
 
 

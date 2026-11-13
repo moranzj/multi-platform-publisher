@@ -68,6 +68,15 @@ class ComposeTests(unittest.TestCase):
             content.bili_tags("三国杀, #桌游棋牌，复盘"),
             ["三国杀", "桌游棋牌", "复盘"])
 
+    def test_douyin_game_shown_in_extra_only_for_douyin(self):
+        job = Job(video="x.mp4", title="通用标题", dy_game="三国杀")
+        self.assertIn("游戏手柄：三国杀", content.compose("douyin", job)["extra"])
+        self.assertEqual(content.compose("kuaishou", job)["extra"], "")
+
+    def test_douyin_game_empty_extra(self):
+        job = Job(video="x.mp4", title="通用标题")
+        self.assertEqual(content.compose("douyin", job)["extra"], "")
+
 
 class PreviewTests(unittest.TestCase):
     def test_preview_contains_platform_and_counts(self):

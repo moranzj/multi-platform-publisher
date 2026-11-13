@@ -388,6 +388,7 @@ def cmd_publish(args) -> int:
         ks_desc=args.ks_desc.strip(),
         dy_title=args.dy_title.strip(),
         dy_desc=args.dy_desc.strip(),
+        dy_game=args.dy_game.strip() or cfg_default(cfg, "douyin_game"),
         date=(args.date or "").strip(),
         time=(args.time or "06:00").strip() or "06:00",
         immediate=bool(getattr(args, "now", False)),
@@ -422,6 +423,8 @@ def cmd_publish(args) -> int:
         hours = (job.publish_at() - datetime.datetime.now()).total_seconds() / 3600
         log.info(f"定时  : {job.date} {job.time}（距今 {sched.human_hours(hours)}）")
     log.info(f"平台  : {'、'.join(REGISTRY[k].name for k in platforms)}")
+    if "douyin" in platforms and job.dy_game.strip():
+        log.info(f"游戏  : 抖音挂「游戏手柄」关联 {job.dy_game.strip()}（快手无此入口）")
     keep = not args.auto
     mode_text = "保持页面，等你手动发布" if keep else "填完自动提交"
     log.info(f"模式  : {mode_text}")
@@ -571,6 +574,8 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--ks-desc", default="", help="快手单独文案（留空用 --desc）")
     pub.add_argument("--dy-title", default="", help="抖音单独标题（留空用 --title）")
     pub.add_argument("--dy-desc", default="", help="抖音单独文案（留空用 --desc）")
+    pub.add_argument("--dy-game", default="",
+                     help="抖音游戏手柄要关联的游戏名（留空则不挂）")
     pub.add_argument("--preview", action="store_true",
                      help="只打印各平台最终文案和检查结果，不打开浏览器")
     pub.add_argument("--date", default="", help="发布日期 YYYY-MM-DD（默认明天）")

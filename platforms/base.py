@@ -29,6 +29,8 @@ class Job:
     date: str = ""          # YYYY-MM-DD，空则用明天
     time: str = "06:00"     # HH:MM
     immediate: bool = False  # True = 立即发布，忽略 date/time
+    # 抖音游戏手柄：挂「游戏手柄」标签并关联这个游戏（快手网页端无此入口）
+    dy_game: str = ""
 
     _SHORT = {"bili": "bili", "kuaishou": "ks", "douyin": "dy"}
 

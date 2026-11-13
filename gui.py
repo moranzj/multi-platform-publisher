@@ -123,6 +123,9 @@ class App:
             value=state_text("ks_topics", as_text(defaults.get("kuaishou_topics"))))
         self.v_dy = tk.StringVar(
             value=state_text("dy_topics", as_text(defaults.get("douyin_topics"))))
+        # 抖音游戏手柄：发布时挂「游戏手柄」标签并关联这个游戏
+        self.v_dy_game = tk.StringVar(
+            value=state_text("dy_game", as_text(defaults.get("douyin_game"))))
         self.v_desc = tk.StringVar(value=state_text("desc"))
         # 分平台文案覆盖；留空回退到上面的通用标题/文案
         self.v_bili_title = tk.StringVar(value=state_text("bili_title"))
@@ -204,6 +207,8 @@ class App:
         r = row(r, "B站话题", self.v_bili_topic, "参与话题：搜平台现有的话题，逗号/空格分隔")
         r = row(r, "快手话题", self.v_ks, "空格分隔，#可以不写，会自动补：如 三国杀 三国杀锦囊妙会")
         r = row(r, "抖音话题", self.v_dy, "空格分隔，#可以不写，会自动补：如 三国杀 随时随地杀一下")
+        r = row(r, "抖音游戏", self.v_dy_game,
+                "抖音挂「游戏手柄」并关联这个游戏（如 三国杀）；留空不挂。快手无此入口")
         r = row(r, "文案", self.v_desc, "留空则用标题（B站简介 / 快手描述 / 抖音作品描述）")
 
         copy_tools = ttk.Frame(frm)
@@ -457,6 +462,7 @@ class App:
             ks_desc=self.v_ks_desc.get().strip(),
             dy_title=self.v_dy_title.get().strip(),
             dy_desc=self.v_dy_desc.get().strip(),
+            dy_game=self.v_dy_game.get().strip(),
         )
 
     def _update_copy_hint(self) -> None:
@@ -681,6 +687,7 @@ class App:
                 "ks_desc": self.v_ks_desc.get().strip(),
                 "dy_title": self.v_dy_title.get().strip(),
                 "dy_desc": self.v_dy_desc.get().strip(),
+                "dy_game": self.v_dy_game.get().strip(),
                 "date": self.v_date.get().strip(),
                 "time": self.v_time.get().strip(),
                 "when": self.v_when.get(),
@@ -708,6 +715,7 @@ class App:
             "ks_desc": self.v_ks_desc.get().strip(),
             "dy_title": self.v_dy_title.get().strip(),
             "dy_desc": self.v_dy_desc.get().strip(),
+            "dy_game": self.v_dy_game.get().strip(),
             "time": self.v_time.get().strip(),
             "when": self.v_when.get(),
         }
@@ -719,7 +727,8 @@ class App:
                 entry.get("ks_topics", ""), entry.get("dy_topics", ""),
                 entry.get("bili_title", ""), entry.get("bili_desc", ""),
                 entry.get("ks_title", ""), entry.get("ks_desc", ""),
-                entry.get("dy_title", ""), entry.get("dy_desc", ""))
+                entry.get("dy_title", ""), entry.get("dy_desc", ""),
+                entry.get("dy_game", ""))
 
     def _fill_from(self, entry: dict) -> None:
         self._auto_title = ""
@@ -736,6 +745,7 @@ class App:
         self.v_ks_desc.set(as_text(entry.get("ks_desc")))
         self.v_dy_title.set(as_text(entry.get("dy_title")))
         self.v_dy_desc.set(as_text(entry.get("dy_desc")))
+        self.v_dy_game.set(as_text(entry.get("dy_game")))
         time_value = as_text(entry.get("time"))
         if time_value:
             self.v_time.set(time_value)
@@ -816,6 +826,7 @@ class App:
             ("--ks-desc", self.v_ks_desc.get().strip()),
             ("--dy-title", self.v_dy_title.get().strip()),
             ("--dy-desc", self.v_dy_desc.get().strip()),
+            ("--dy-game", self.v_dy_game.get().strip()),
         ]:
             if value:
                 cmd += [flag, value]

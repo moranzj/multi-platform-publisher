@@ -66,6 +66,10 @@ class Douyin(Platform):
         self._cover(page, job.cover, job.video, log)
         steps.shot(page, log, "douyin-04-cover")
 
+        # 4.5) 游戏手柄（可选：填了游戏名才挂；快手网页端无此入口）
+        self._gamepad(page, job, log)
+        steps.shot(page, log, "douyin-045-gamepad")
+
         # 5) 定时
         if not self._schedule(page, job, log):
             steps.shot(page, log, "douyin-05-scheduled")
@@ -361,6 +365,160 @@ class Douyin(Platform):
             ))
         except Exception:
             return False
+
+    def _gamepad(self, page, job: Job, log: RunLog) -> None:
+        """扩展信息 → 添加标签 → 「游戏手柄」→ 搜索并关联游戏。
+
+        入口（2026-11 实测）：「添加标签」行的下拉默认显示「位置」，
+        点开有 位置/影视演艺/小程序/游戏手柄/标记万物 五个选项；
+        选「游戏手柄」后行内变成「添加作品同款游戏」搜索框。
+        快手网页端没有这个入口，所以只有抖音做。
+        挂件是锦上添花：任何一步失手只告警不中断，别让它挡住定时发布。
+        """
+        game = (job.dy_game or "").strip()
+        if not game:
+            return
+        log.step(f"挂游戏手柄：{game}")
+        try:
+            # 上次草稿可能已经选过「游戏手柄」；这种情况跳过选标签，直接填游戏
+            already = page.evaluate("""() => {
+              const el = [...document.querySelectorAll('*')]
+                  .filter(e => e.offsetParent && e.children.length === 0
+                               && (e.textContent || '').trim() === '游戏手柄')
+                  .pop();
+              return !!el;
+            }""")
+            if already:
+                log.step("草稿里已选过「游戏手柄」，直接填游戏名")
+            else:
+                opened = page.evaluate("""() => {
+                  const el = [...document.querySelectorAll('*')]
+                      .filter(e => e.offsetParent && e.children.length === 0
+                                   && (e.textContent || '').trim() === '位置')
+                      .pop();
+                  if (!el) return false;
+                  el.scrollIntoView({block: 'center'});
+                  (el.closest('[class*=select], [role=combobox]') || el).click();
+                  return true;
+                }""")
+                if not opened:
+                    log.warn("找不到「添加标签」下拉（页面可能改版），游戏手柄跳过")
+                    return
+                page.wait_for_timeout(1200)
+                picked = page.evaluate("""() => {
+                  const opt = [...document.querySelectorAll('*')]
+                      .filter(e => e.offsetParent && e.children.length === 0
+                                   && (e.textContent || '').trim() === '游戏手柄')
+                      .pop();
+                  if (!opt) return false;
+                  opt.click();
+                  return true;
+                }""")
+                if not picked:
+                    log.warn("下拉里没有「游戏手柄」选项，游戏手柄跳过")
+                    return
+                page.wait_for_timeout(2000)
+                log.step("已选「游戏手柄」标签")
+
+            # 行内变成「添加作品同款游戏」的搜索框。Semi 的占位是渲染出来的
+            # 文本而不是 input.placeholder，所以先点占位/行内 input 聚焦，
+            # 再用真实键盘输入（组件状态才能跟上）。
+            clicked = page.evaluate("""() => {
+              const inp = [...document.querySelectorAll('input')]
+                  .find(e => e.offsetParent && (e.placeholder || '').includes('同款游戏'));
+              if (inp) {
+                inp.scrollIntoView({block: 'center'});
+                inp.click();
+                inp.focus();
+                return 'input';
+              }
+              const ph = [...document.querySelectorAll('*')]
+                  .filter(e => e.offsetParent && e.children.length === 0
+                               && (e.textContent || '').trim() === '添加作品同款游戏')
+                  .pop();
+              if (!ph) return '';
+              ph.scrollIntoView({block: 'center'});
+              const box = ph.closest('[class*=select], [role=combobox]') || ph;
+              box.click();
+              return 'placeholder';
+            }""")
+            if not clicked:
+                log.warn("没找到「添加作品同款游戏」输入框，游戏名没填，请在页面上手动确认")
+                return
+            page.wait_for_timeout(900)
+            focused = page.evaluate(
+                "() => document.activeElement && document.activeElement.tagName === 'INPUT'")
+            if not focused:
+                # 点占位后焦点可能落在容器上，用真实鼠标点一次输入框区域
+                box = page.evaluate("""() => {
+                  const ph = [...document.querySelectorAll('*')]
+                      .filter(e => e.offsetParent && e.children.length === 0
+                                   && (e.textContent || '').trim() === '添加作品同款游戏')
+                      .pop();
+                  if (!ph) return null;
+                  const row = ph.closest('[class*=select], [role=combobox]') || ph.parentElement;
+                  const r = (row || ph).getBoundingClientRect();
+                  return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+                }""")
+                if box:
+                    page.mouse.click(box["x"], box["y"])
+                    page.wait_for_timeout(800)
+                    focused = page.evaluate(
+                        "() => document.activeElement && document.activeElement.tagName === 'INPUT'")
+            if not focused:
+                log.warn("游戏搜索框拿不到焦点，游戏名没填，请在页面上手动确认")
+                return
+            page.keyboard.type(game, delay=60)
+            page.wait_for_timeout(2000)
+
+            # 搜索结果是 anchor-game-option-xxxx 行，游戏名在 title-name span 里；
+            # 行内是多行文本（游戏名 + 现金奖励等），必须按类名找行再点。
+            # 建议是服务端搜索返回的，可能要等两三秒，轮询重试。
+            row_js = """(game) => {
+              const rows = [...document.querySelectorAll('div')]
+                  .filter(e => e.offsetParent
+                               && /^anchor-game-option-[A-Za-z0-9_]+$/.test(
+                                   String(e.className || '').trim()));
+              const cands = rows.map(r => {
+                  const nameEl = [...r.querySelectorAll("span[class*='title-name']")].pop();
+                  return {row: r,
+                          name: nameEl ? (nameEl.innerText || '').trim() : ''};
+              }).filter(c => c.name);
+              if (!cands.length) return null;
+              const pick = cands.find(c => c.name === game)
+                           || cands.find(c => c.name.startsWith(game))
+                           || cands[0];
+              pick.row.click();
+              return pick.name;
+            }"""
+            hit = None
+            for _ in range(6):
+                hit = page.evaluate(row_js, game)
+                if hit:
+                    break
+                page.wait_for_timeout(1000)
+            page.wait_for_timeout(1500)
+            if hit:
+                still = page.evaluate("""() => !![...document.querySelectorAll('*')]
+                    .filter(e => e.offsetParent && e.children.length === 0
+                                 && (e.textContent || '').trim() === '添加作品同款游戏')
+                    .pop()""")
+                if still:
+                    log.warn(f"点了「{hit}」但搜索框还是空的，游戏可能没关联上，"
+                             "发布前请在页面上手动确认")
+                else:
+                    log.ok(f"游戏手柄已挂：{hit}")
+            else:
+                diag = page.evaluate("""() => ({
+                    rows: document.querySelectorAll("[class*='anchor-game-option']").length,
+                    value: document.activeElement && document.activeElement.tagName === 'INPUT'
+                           ? document.activeElement.value : '',
+                })""")
+                log.warn(f"没匹配到「{game}」的搜索结果（行数 {diag['rows']}，"
+                         f"输入值 {diag['value']!r}），游戏可能没关联上，"
+                         "发布前请在页面上手动选一次")
+        except Exception as exc:
+            log.warn(f"游戏手柄流程失败: {type(exc).__name__}")
 
     def _schedule(self, page, job: Job, log: RunLog) -> bool:
         if job.immediate:
