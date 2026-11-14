@@ -1,6 +1,20 @@
 # 多平台视频发布器
 
+<div align="center">
+
+🌐 **简体中文** · [English](README.en.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português (BR)](README.pt-BR.md) · [Italiano](README.it.md) · [Türkçe](README.tr.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [ไทย](README.th.md) · [Polski](README.pl.md) · [Nederlands](README.nl.md) · [العربية](README.ar.md) · [हिन्दी](README.hi.md)
+
+</div>
+
 抖音 / 快手 / B站 三平台一条视频批量发布，支持自定义标题、话题、封面、分平台文案，以及立即发布 / 定时发布。填表前可以先预览每个平台最终会收到什么，并检查标题长度、标签数量、封面比例等常见问题。
+
+<p align="center">
+  <img src="docs/images/app-form.png" width="32%" alt="填写表单">
+  <img src="docs/images/app-run.png" width="32%" alt="运行日志">
+  <img src="docs/images/app-done.png" width="32%" alt="填写完成">
+</p>
+
+> 📖 **新手图文教程**：[简体中文](docs/tutorial-zh.md) · [English](docs/tutorial-en.md)
 
 > **分享或发布前必看**：`profile/` 里保存的是你的登录 Cookie，`logs/`、`gui-state.json`、
 > `history.json` 里可能有你的账号、视频路径和标题。打包给别人时**不要带上这些内容**，
@@ -60,7 +74,7 @@
 
 ## exe 免安装版（打开即用）
 
-不想装 Python？直接用打包好的 exe 版：Release 页下载 **`multi-platform-publisher-<版本>-exe.zip`**。
+不想装 Python？直接用打包好的 exe 版：在 [Releases](https://github.com/moranzj/multi-platform-publisher/releases/latest) 页下载 **`multi-platform-publisher-<版本>-exe.zip`**。
 
 1. 解压到任意**可写**的目录（如 `D:\多平台发布器`），不要放 Program Files。
 2. 双击里面的 **`多平台发布器.exe`** —— 无需安装 Python；浏览器复用系统已装的 Chrome 或 Edge（两个都没有就先装一个 Edge）。
